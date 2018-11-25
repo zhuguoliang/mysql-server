@@ -630,10 +630,10 @@ lock			--	semaphore;
 kernel			--	kernel;
 
 query thread execution:
-(a) without lock mutex
-reserved		--	process executing in user mode;
+(a) without lock mutex reserved		
+--	process executing in user mode;
 (b) with lock mutex reserved
-                        --	process executing in kernel mode;
+--	process executing in kernel mode;
 
 The server has several backgroind threads all running at the same
 priority as user threads. It periodically checks if here is anything

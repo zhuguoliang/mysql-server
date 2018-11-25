@@ -1714,6 +1714,9 @@ struct buf_pool_t {
   page_no_t read_ahead_area;   /*!< size in pages of the area which
                                the read-ahead algorithms read if
                                invoked */
+  // 这个hashtable 存的是buf_page_t/buf_block_t 的结构体
+  // key 是(space_id, offset)
+  // 也就是所有在内存中的page 都可以通过这个page_hash 找到
   hash_table_t *page_hash;     /*!< hash table of buf_page_t or
                                buf_block_t file pages,
                                buf_page_in_file() == TRUE,
@@ -1822,6 +1825,7 @@ struct buf_pool_t {
   /** @name LRU replacement algorithm fields */
   /* @{ */
 
+  // buffer pool 的free list
   UT_LIST_BASE_NODE_T(buf_page_t) free;
   /*!< base node of the free
   block list */

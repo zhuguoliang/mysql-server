@@ -888,6 +888,7 @@ Wait_stats log_write_up_to(log_t &log, lsn_t end_lsn, bool flush_to_disk) {
 #define log_writer_mutex_own(log) true
 #endif /* !UNIV_HOTBACKUP */
 
+// 根据offset 算出在这个redolog 文件中的偏移量
 uint64_t log_files_size_offset(const log_t &log, uint64_t offset) {
   ut_ad(log_writer_mutex_own(log));
 
@@ -901,6 +902,8 @@ uint64_t log_files_real_offset(const log_t &log, uint64_t offset) {
                        (1 + offset / (log.file_size - LOG_FILE_HDR_SIZE)));
 }
 
+// 给定一个lsn, 算出这个lsn 具体在文件的位置. 这个lsn 有可能超过了
+// redolog 个数 * redolog 大小的位置
 uint64_t log_files_real_offset_for_lsn(const log_t &log, lsn_t lsn) {
   uint64_t size_offset;
   uint64_t size_capacity;
@@ -923,8 +926,12 @@ uint64_t log_files_real_offset_for_lsn(const log_t &log, lsn_t lsn) {
     delta = size_capacity - delta % size_capacity;
   }
 
+  // 根据current_file_real_offset 算出在redolog 整个文件里面的偏移量
   size_offset = log_files_size_offset(log, log.current_file_real_offset);
 
+  // 因为有可能这个size_offset 超过了 n_files(redo 文件个数) *
+  // file_size(redolog大小) 的大小
+  // 所以需要% 他们的乘积用来确定最终的位置
   size_offset = (size_offset + delta) % size_capacity;
 
   return (log_files_real_offset(log, size_offset));
@@ -1026,6 +1033,8 @@ static void start_next_file(log_t &log, lsn_t start_lsn) {
   ut_a(real_offset + OS_FILE_LOG_BLOCK_SIZE <= log.files_real_capacity);
 
   /* Flush header of the new log file. */
+  // 当前这个redolog file 已经写完了, 要写下一个redolog file
+  // 所以把下一个redolog file 的header 先补充上
   log_files_header_flush(log, real_offset / log.file_size, start_lsn);
 
   /* Update following members of log:
@@ -1331,10 +1340,14 @@ static inline size_t prepare_for_write_ahead(log_t &log, uint64_t real_offset,
                                              size_t &write_size) {
   /* We need to perform write ahead during this write. */
 
+  // next_wa 就是到下一次 srv_log_write_ahead_size 的位置, 也就是write aheade
+  // 是以srv_log_write_ahead_size 对齐的, 并不是按照log block 大小对齐
+  // 这里默认的write aheade 的大小是INNODB_LOG_WRITE_AHEAD_SIZE_DEFAULT = 8192
   const auto next_wa = compute_next_write_ahead_end(real_offset);
 
   ut_a(real_offset + write_size <= next_wa);
 
+  // 正常情况下write_ahead size 大小等于next_wa - (这次要写入的offset+写入的大小)
   size_t write_ahead =
       static_cast<size_t>(next_wa - (real_offset + write_size));
 
@@ -1349,6 +1362,9 @@ static inline size_t prepare_for_write_ahead(log_t &log, uint64_t real_offset,
             innodb_log_write_ahead_size = 4KiB,
             LOG_FILE_HDR_SIZE is 2KiB. */
 
+    // 这里是如果已经到这个redolog 的末尾了, 那么这个write ahead 的大小就
+    // 只能到末尾为止了, 所以是current_file_end_offset - real_offset -
+    // write_size
     write_ahead = static_cast<size_t>(log.current_file_end_offset -
                                       real_offset - write_size);
   }
@@ -1357,6 +1373,9 @@ static inline size_t prepare_for_write_ahead(log_t &log, uint64_t real_offset,
 
   LOG_SYNC_POINT("log_writer_before_write_ahead");
 
+  /*
+   * 这里是将write_ahead_buf + write_size 以后的内存都用 0x00 来填充
+   */
   std::memset(log.write_ahead_buf + write_size, 0x00, write_ahead);
 
   write_size += write_ahead;
@@ -1421,6 +1440,7 @@ static void log_files_write_buffer(log_t &log, byte *buffer, size_t buffer_size,
 
     /* We write all the data directly from the write-ahead buffer,
     where we first need to copy the data. */
+    // 将buffer 中的内容写入到 redolog 的write-ahead buffer
     copy_to_write_ahead_buffer(log, buffer, write_size, start_lsn,
                                checkpoint_no);
 
@@ -1431,6 +1451,10 @@ static void log_files_write_buffer(log_t &log, byte *buffer, size_t buffer_size,
 
   srv_stats.os_log_pending_writes.inc();
 
+  // 经过上一步的填充 write_ahead 以后, 我们可以保证这一次写入的
+  // 就是完整的write ahead 的数据了
+  // 这里的write_buf 就是填充完0x00 以后的buffer
+  // 最后会调用到fil_redo_io 将write_buf 写入到real_offset 中
   /* Now, we know, that we are going to write completed
   blocks only (originally or copied and completed). */
   write_blocks(log, write_buf, write_size, real_offset);
@@ -1442,8 +1466,14 @@ static void log_files_write_buffer(log_t &log, byte *buffer, size_t buffer_size,
   const lsn_t new_write_lsn = start_lsn + lsn_advance;
   ut_a(new_write_lsn > log.write_lsn.load());
 
+  /*
+   * 更新最新的redolog 里面的write_lsn 信息, 这个新的lsn 信息是
+   * start_lsn + lsn_advance(实际写入多少的lsn信息);
+   */
   log.write_lsn.store(new_write_lsn);
 
+  // 完成write 操作以后同时要通知等待在old_write_lsn, new_write_lsn
+  // 的节点, 这里等待的应该有log flush 线程
   notify_about_advanced_write_lsn(log, old_write_lsn, new_write_lsn);
 
   srv_stats.os_log_pending_writes.dec();
@@ -1478,6 +1508,10 @@ static void log_writer_write_buffer(log_t &log, lsn_t next_write_lsn) {
   size_t start_offset = last_write_lsn % log.buf_size;
   size_t end_offset = next_write_lsn % log.buf_size;
 
+  // 如果发现start_offset >= end_offset
+  // 这说明他们两个之间已经扩越过了一个log block, 所以
+  // 这次的write to redo log 只需要把当前这个Log block 往
+  // 下刷就可以了
   if (start_offset >= end_offset) {
     ut_a(next_write_lsn - last_write_lsn >= log.buf_size - start_offset);
 
@@ -1644,6 +1678,7 @@ static void log_writer_write_buffer(log_t &log, lsn_t next_write_lsn) {
   byte *buf_end = log.buf + end_offset;
 
   /* Do the write to the log files */
+  // 这里是最后实际写入数据的地方
   log_files_write_buffer(
       log, buf_begin, buf_end - buf_begin,
       ut_uint64_align_down(last_write_lsn, OS_FILE_LOG_BLOCK_SIZE));
@@ -1685,6 +1720,10 @@ void log_writer(log_t *log_ptr) {
       /* Advance lsn up to which data is ready in log buffer. */
       (void)log_advance_ready_for_write_lsn(log);
 
+      // 在上面的函数 log_advance_ready_fro_write_lsn 的时候
+      // 也会调用log_buffer_ready_for_write_lsn 去获得已经可以write 的lsn
+      // 在上面log_advnace_ready_for_write_lsn 通过link_buf 不断的next 去找
+      // 可以更新的内容, 所以link_buf 里面的最后一个就是最后更新的结果
       ready_lsn = log_buffer_ready_for_write_lsn(log);
 
       /* Wait until any of following conditions holds:
@@ -1715,6 +1754,8 @@ void log_writer(log_t *log_ptr) {
     MONITOR_INC_WAIT_STATS(MONITOR_LOG_WRITER_, wait_stats);
 
     /* Do the actual work. */
+    // ready_lsn 是目前通过link_buf 检查, 连续的一块log buffer
+    // 可以把着一块的内容刷到 redo log 上
     if (log.write_lsn.load() < ready_lsn) {
       log_writer_write_buffer(log, ready_lsn);
 

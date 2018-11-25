@@ -964,6 +964,8 @@ static const lock_t *lock_rec_other_has_conflicting(
   RecID rec_id{block, heap_no};
   const bool is_supremum = rec_id.is_supremum();
 
+  // 这里对于这个record 上的所有record 进行遍历
+  // 判断当前这个lock 和 这个page 上的其他Lock 是否有冲突
   auto lock = Lock_iter::for_each(rec_id, [=](const lock_t *lock) {
     if (lock_rec_has_to_wait(trx, mode, lock, is_supremum)) {
       return (false);
@@ -1159,8 +1161,12 @@ lock_t *RecLock::lock_alloc(trx_t *trx, dict_index_t *index, ulint mode,
 
   lock_t *lock;
 
+  // 这里判断这个rec_pool 里面的lock 是否被rec_cached 用完了, 如果用完了
+  // 就批量申请一批, 这里可以看出申请的时候都是像mem_heap 上申请
   if (trx->lock.rec_cached >= trx->lock.rec_pool.size() ||
       sizeof(*lock) + size > REC_LOCK_SIZE) {
+    // 这里定义申请空间大小的时候是n_bytes 是m_size(也就是这个rec_lock_t 的
+    // 大小 + lock 这个指针的大小
     ulint n_bytes = size + sizeof(*lock);
     mem_heap_t *heap = trx->lock.lock_heap;
 
@@ -1185,6 +1191,13 @@ lock_t *RecLock::lock_alloc(trx_t *trx, dict_index_t *index, ulint mode,
 
   /* Predicate lock always on INFIMUM (0) */
 
+  // 这里为什么lock[1] 就是n_bits 里面所表示的地址呢?
+  // 因为在分配空间的时候是这样分配的
+  //     ulint n_bytes = size + sizeof(*lock);
+  // 也就是这里给lock 分配地址的时候是分配lock + 额外的
+  // size 的地址, 所以lock[1] 指向的就是这个额外的size
+  // 所以这个size 就是分配给n_bits 后面的地址, 那么这个地址
+  // 多大呢?
   if (is_predicate_lock(mode)) {
     rec_lock.n_bits = 8;
 
@@ -1495,6 +1508,13 @@ lock_t *RecLock::create(trx_t *trx, bool add_to_hash, const lock_prdt_t *prdt) {
 Check the outcome of the deadlock check
 @param[in,out] victim_trx	Transaction selected for rollback
 @param[in,out] lock		Lock being requested
+所以这里冲突检查的结果有三种
+1. DB_DEADLOCK 说明这个事务申请的lock 与系统中当前存在的lock 发送冲突
+并检测到环存在, 有死锁了, 所以这个事务要被放弃掉
+2. DB_SUCCESS_LOCKED_REC 刚上诉场景一样, 有死锁产生, 但是放弃掉的不是当前
+事务, 而且其他事务, 因为获得了这个lock
+3. 没有死锁, 等待这个锁, 那什么时候能够拿到这个锁呢?
+
 @return DB_LOCK_WAIT, DB_DEADLOCK or DB_SUCCESS_LOCKED_REC */
 dberr_t RecLock::check_deadlock_result(const trx_t *victim_trx, lock_t *lock) {
   ut_ad(lock_mutex_own());
@@ -1533,6 +1553,7 @@ dberr_t RecLock::deadlock_check(lock_t *lock) {
   ut_ad(lock->trx == m_trx);
   ut_ad(trx_mutex_own(m_trx));
 
+  // 这里通过DeallockChecker 找出需要被victim 的trx
   const trx_t *victim_trx = DeadlockChecker::check_and_resolve(lock, m_trx);
 
   /* Check the outcome of the deadlock test. It is possible that
@@ -1754,6 +1775,10 @@ static void lock_rec_add_to_queue(
       if one is found and there are no waiting lock requests,
       we can just set the bit */
 
+      // 这里只是找到这个page 上面是否有lock, 如果有lock 的话
+      // 然后直接设置这个nth_bit 就可以了
+      // 否则就需要重新创建一个lock
+      // 创建使用的就是RecLock这个结构体
       lock = lock_rec_find_similar_on_page(type_mode, heap_no, first_lock, trx);
 
       if (lock != NULL) {
@@ -5655,6 +5680,7 @@ dberr_t lock_rec_insert_check_and_lock(
   const rec_t *next_rec = page_rec_get_next_const(rec);
   ulint heap_no = page_rec_get_heap_no(next_rec);
 
+  // 这个是整个lock_sys 的mutex, 这个lock 的开销应该很大
   lock_mutex_enter();
   /* Because this code is invoked for a running transaction by
   the thread that is serving the transaction, it is not necessary
@@ -5713,6 +5739,9 @@ dberr_t lock_rec_insert_check_and_lock(
 
     trx->owns_mutex = true;
 
+    // 在所有的请求锁里面, 在需要判断是否存在锁冲突的地方使用
+    // lock_rec_other_has_conflicting 进行冲突判断
+    // 然后如果有冲突, 就加入到wait_for 队列
     err = rec_lock.add_to_waitq(wait_for);
 
     trx->owns_mutex = false;
@@ -6949,6 +6978,8 @@ const trx_t *DeadlockChecker::select_victim() const {
     }
   }
 
+  // 所以判断权重的时候, 只是比较最开始的这个事务m_start的权重和最后
+  // 这个指向这个m_start 的事务的权重, 在他们之间选一个被rollback 掉
   if (trx_weight_ge(m_wait_lock->trx, m_start)) {
     /* The joining transaction is 'smaller',
     choose it as the victim and roll it back. */
@@ -6975,10 +7006,16 @@ const trx_t *DeadlockChecker::search() {
   ulint heap_no;
   const lock_t *lock = get_first_lock(&heap_no);
 
+  /*
+   * 这里是一个DFS, 但是是用一个stack 来去实现的DFS
+   * 也就是DFS 找到一个节点, 就把这个节点放到stack 上, 这个stack 默认大小
+   * 是4096 个元素
+   */
   for (;;) {
     /* We should never visit the same sub-tree more than once. */
     ut_ad(lock == NULL || !is_visited(lock));
 
+    // 这里判断这个stack 上有没有elems, 如果没有, 说明这个DFS 结束了
     while (m_n_elems > 0 && lock == NULL) {
       /* Restore previous search state. */
 
@@ -7034,6 +7071,8 @@ const trx_t *DeadlockChecker::search() {
         ut_error;
       }
 #endif /* UNIV_DEBUG */
+      // 选择哪一个trx 要被选为被victim 的trx, 主要就在这个select_victim()
+      // 函数里面
       return (select_victim());
 
     } else if (is_too_deep()) {
@@ -7158,6 +7197,11 @@ const trx_t *DeadlockChecker::check_and_resolve(const lock_t *lock,
   do {
     DeadlockChecker checker(trx, lock, s_lock_mark_counter);
 
+    /*
+     * 就是在这个checker.search() 函数里面找出要被victim 的trx
+     * 那么这里search() 是如何找的, 广度优先搜索么? 然后如何
+     * 比较优先级低的事务呢?
+     */
     victim_trx = checker.search();
 
     /* Search too deep, we rollback the joining transaction only
@@ -7184,6 +7228,8 @@ const trx_t *DeadlockChecker::check_and_resolve(const lock_t *lock,
       MONITOR_INC(MONITOR_DEADLOCK);
     }
 
+    // 只要检测出有死锁, 有victim 的trx, 并且这个trx 不是当前这个trx
+    // 那么就继续检测有没有死锁出现, 出现死锁, 就把选出的相应的trx rollback
   } while (victim_trx != NULL && victim_trx != trx);
 
   /* If the joining transaction was selected as the victim. */

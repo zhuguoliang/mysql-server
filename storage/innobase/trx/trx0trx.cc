@@ -2456,6 +2456,11 @@ bool trx_weight_ge(const trx_t *a, /*!< in: transaction to be compared */
   /* If mysql_thd is NULL for a transaction we assume that it has
   not edited non-transactional tables. */
 
+  /*
+   * 所以这里先检查有没有修改了 non-transaction 的table
+   * 因为如果有这样的修改, 这个trx 就无法rollback
+   * 那么就尽量别让这样的事务rollback
+   */
   a_notrans_edit =
       a->mysql_thd != NULL && thd_has_edited_nontrans_tables(a->mysql_thd);
 
@@ -2469,6 +2474,16 @@ bool trx_weight_ge(const trx_t *a, /*!< in: transaction to be compared */
   /* Either both had edited non-transactional tables or both had
   not, we fall back to comparing the number of altered/locked
   rows. */
+
+  /*
+   * 这里TRX_WEIGHT 主要计算的根据是
+   * (t)->undo_no + UT_LIST_GET_LEN((t)->lock.trx_locks)
+   * 这里的undo_no 指的是
+   * it represents the number of modified/inserted rows in a transaction 
+   * 也就是这个事务里面modified/inserted 的行数
+   * 另外一个是len(trx_locks), 也就是这个事务加的lock 数. 因此就是
+   * 这个事务modified/inserted 行数+ 这个事务加lock 的数
+   */
 
   return (TRX_WEIGHT(a) >= TRX_WEIGHT(b));
 }

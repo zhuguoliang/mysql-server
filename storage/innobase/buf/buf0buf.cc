@@ -415,6 +415,10 @@ lsn_t buf_pool_get_oldest_modification_lwm(void) {
 
   ut_a(checkpoint_lsn != 0);
 
+  // 这里可以看到, 选择这个lwm(low watermark) 的时候是获得这个approximate 的
+  // lsn 然后减去这个lag, 这个lag 就是recent_close buffer 的大小
+  // 然后和上一次的last checkpoint 做比较, 获得较大的那个lsn 作为
+  // 最新的checkpoint lsn
   if (lsn > lag) {
     return (std::max(checkpoint_lsn, lsn - lag));
 
@@ -3189,6 +3193,7 @@ buf_block_t *buf_page_get_gen(const page_id_t &page_id,
   rw_lock_t *hash_lock;
   buf_block_t *fix_block;
   ulint retries = 0;
+  // buf_pool_get 里面根据page_id % instances 去获得在哪一个 buf_pool_t 上
   buf_pool_t *buf_pool = buf_pool_get(page_id);
 
   ut_ad(mtr->is_active());
@@ -3222,6 +3227,11 @@ buf_block_t *buf_page_get_gen(const page_id_t &page_id,
         ibuf_page_low(page_id, page_size, FALSE, file, line, NULL));
 
   buf_pool->stat.n_page_gets++;
+  /*
+   * 这个hash_lock 是这个hashtable 自带的Lock, 在要操作这个slot 的时候,
+   * 这个hashtable 需要先拿住这个lock 才行, 也就是这个hashtable 并不是
+   * 只有一个lock, 会有多个Lock
+   */
   hash_lock = buf_page_hash_lock_get(buf_pool, page_id);
 loop:
   block = guess;
@@ -3257,6 +3267,11 @@ loop:
   }
 
   if (block == NULL) {
+    /*
+     * 所以读取流程很简单, 就是先判断有没有在buffer pool 里面, 在里面的话
+     * 就在buf_pool->hash_table 里面, 如果不在里面的话, 就从磁盘中读取
+     *
+     */
     /* Page not in buf_pool: needs to be read from file */
 
     if (mode == BUF_GET_IF_IN_POOL_OR_WATCH) {
@@ -3307,6 +3322,7 @@ loop:
       return (NULL);
     }
 
+    // 当page 不在内存中的时候, 从磁盘中读取的入口函数
     if (buf_read_page(page_id, page_size)) {
       buf_read_ahead_random(page_id, page_size, ibuf_inside(mtr));
 
@@ -4164,6 +4180,7 @@ buf_page_t *buf_page_init_for_read(dberr_t *err, ulint mode,
   rw_lock_t *hash_lock;
   mtr_t mtr;
   void *data = NULL;
+  // 根据page_id 返回对应的buf_pool instance
   buf_pool_t *buf_pool = buf_pool_get(page_id);
 
   ut_ad(buf_pool);

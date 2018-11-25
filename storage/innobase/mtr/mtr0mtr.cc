@@ -643,6 +643,9 @@ void mtr_t::Command::execute() {
     write_log.m_lsn = handle.start_lsn;
     write_log.m_rec_group_start_lsn = handle.start_lsn;
 
+    // 这里这种坑爹的写法就是对于m_log 里面的每一个元素都
+    // 调用一下write_log, 然后在write_log 因为重载的() 操作
+    // 然后在for_each_block 里面就会执行write_log(block) 的操作了
     m_impl->m_log.for_each_block(write_log);
 
     ut_ad(write_log.m_left_to_write == 0);

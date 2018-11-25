@@ -130,7 +130,7 @@ struct Log_handle {
 
 /** Redo log - single data structure with state of the redo log system.
 In future, one could consider splitting this to multiple data structures. */
-struct alignas(INNOBASE_CACHE_LINE_SIZE) log_t {
+struct log_t {
 /**************************************************/ /**
 
  @name Users writing to log buffer
@@ -329,12 +329,22 @@ struct alignas(INNOBASE_CACHE_LINE_SIZE) log_t {
 #endif /* !UNIV_HOTBACKUP */
 
   /** Some lsn value within the current log file. */
+  // 当前redolog 收到的最新的lsn
   lsn_t current_file_lsn;
 
   /** File offset for the current_file_lsn. */
+  // current_file_lsn 在当前具体的redolog 的文件的偏移位置
   uint64_t current_file_real_offset;
 
   /** Up to this file offset we are within the same current log file. */
+  /*
+   * log.current_file_end_offset = log.current_file_real_offset -
+   *   log.current_file_real_offset % log.file_size +
+   *   log.file_size;
+   * current_file_end_offset 就是current_file_real_offset 所在的redolog 文件
+   * 的文件的末尾信息
+   */
+
   uint64_t current_file_end_offset;
 
   /** Number of performed IO operations (only for printing stats). */
@@ -454,6 +464,9 @@ struct alignas(INNOBASE_CACHE_LINE_SIZE) log_t {
 
   /** Size of the log buffer expressed in number of data bytes,
   that is excluding bytes for headers and footers of log blocks. */
+  /*
+   * log buffer 的大小, 不包括headers, footers 的信息
+   */
   atomic_sn_t buf_size_sn;
 
   /** Size of the log buffer expressed in number of total bytes,
@@ -463,6 +476,8 @@ struct alignas(INNOBASE_CACHE_LINE_SIZE) log_t {
   /** Capacity of the log files in total, expressed in number of
   data bytes, that is excluding bytes for headers and footers of
   log blocks. */
+  // sn_capacity 指的是redo log 所能存储的最大的数据量, 不包括
+  // header, footer 等信息
   lsn_t sn_capacity;
 
   /** Lsn from which recovery has been started. */

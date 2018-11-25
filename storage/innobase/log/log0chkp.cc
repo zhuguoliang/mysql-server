@@ -149,6 +149,7 @@ static lsn_t log_get_available_for_checkpoint_lsn(const log_t &log) {
 
   LOG_SYNC_POINT("log_get_available_for_chkp_lsn_before_dpa");
 
+  // 这里dpa_lsn 指的是这个recent_close 的最后的位置
   const lsn_t dpa_lsn = log_buffer_dirty_pages_added_up_to_lsn(log);
 
   ut_a(dpa_lsn >= log.last_checkpoint_lsn.load());

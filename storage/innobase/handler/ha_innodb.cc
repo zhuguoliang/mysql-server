@@ -3855,6 +3855,11 @@ static int innodb_init_params() {
         << UNIV_PAGE_SIZE_DEF << " to " << srv_page_size << ".";
   }
 
+  /*
+   * 这里srv_page_size 默认最大大小是16kb, 所以如果我们设置的write ahead
+   * buffer 大小是不能超过16k
+   * 否则
+   */
   if (srv_log_write_ahead_size > srv_page_size) {
     srv_log_write_ahead_size = srv_page_size;
   } else {

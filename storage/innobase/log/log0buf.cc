@@ -798,6 +798,11 @@ lsn_t log_buffer_write(log_t &log, const Log_handle &handle, const byte *str,
 
     /* This is the critical memcpy operation, which copies data
     from internal mtr's buffer to the shared log buffer. */
+    /*
+     * 这里将mtr 里面的内容拷贝到log buffer 里面
+     * 有一个问题, 能否减少这次内存拷贝, 直接将mtr 的内容写入到
+     * redo log file 里面
+     */
     std::memcpy(ptr, str, len);
 
     ut_a(len <= str_len);
