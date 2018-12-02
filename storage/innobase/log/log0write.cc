@@ -1153,6 +1153,7 @@ static inline size_t compute_how_much_to_write(const log_t &log,
 
   /* Check how much we have written ahead to avoid read-on-write. */
 
+  // 如果这个write ahead buffer 的大小不够大
   if (!current_write_ahead_enough(log, real_offset, write_size)) {
     if (!current_write_ahead_enough(log, real_offset, 1)) {
       /* Current write-ahead region has no space at all. */
@@ -1419,6 +1420,8 @@ static void log_files_write_buffer(log_t &log, byte *buffer, size_t buffer_size,
     return;
   }
 
+  // 在这里把每一个512 byte 所需要的header, checksum 信息准备好
+  // 这里有可能涉及多个block, 涉及的长队有write_size 这么长
   prepare_full_blocks(log, buffer, write_size, start_lsn, checkpoint_no);
 
   byte *write_buf;
@@ -1472,8 +1475,9 @@ static void log_files_write_buffer(log_t &log, byte *buffer, size_t buffer_size,
    */
   log.write_lsn.store(new_write_lsn);
 
-  // 完成write 操作以后同时要通知等待在old_write_lsn, new_write_lsn
-  // 的节点, 这里等待的应该有log flush 线程
+  // 完成write 操作以后同时要通知write_notifier_event
+  // 那么相应的Log_write_notifier thread会被唤醒, 然后检查write_lsn
+  // 有更新, 就会去唤醒相应的log_flush thread
   notify_about_advanced_write_lsn(log, old_write_lsn, new_write_lsn);
 
   srv_stats.os_log_pending_writes.dec();
@@ -1489,6 +1493,8 @@ static void log_files_write_buffer(log_t &log, byte *buffer, size_t buffer_size,
   update_current_write_ahead(log, real_offset, write_size);
 }
 
+// 这里常见的这个next_write_lsn 是之前获得的ready_lsn
+// ready_lsn 是这次遍历获得的连续的一段内存最后的lsn
 static void log_writer_write_buffer(log_t &log, lsn_t next_write_lsn) {
   ut_ad(log_writer_mutex_own(log));
 
@@ -1679,6 +1685,7 @@ static void log_writer_write_buffer(log_t &log, lsn_t next_write_lsn) {
 
   /* Do the write to the log files */
   // 这里是最后实际写入数据的地方
+  // 这里会保证buf_end, buf_begin 在一个block size 大小以内
   log_files_write_buffer(
       log, buf_begin, buf_end - buf_begin,
       ut_uint64_align_down(last_write_lsn, OS_FILE_LOG_BLOCK_SIZE));
@@ -1887,6 +1894,9 @@ static void log_flush_low(log_t &log) {
 
   log.last_flush_start_time = Log_clock::now();
 
+  // 所以这里flush 的范围是上一次的last_flush_lsn 到这一次的write_lsn
+  // write_lsn 也就是到write_lsn 为止, 所有的page 已经从log buffer 刷到log files
+  // 了
   const lsn_t last_flush_lsn = log.flushed_to_disk_lsn.load();
 
   const lsn_t flush_up_to_lsn = log.write_lsn.load();
@@ -1896,6 +1906,7 @@ static void log_flush_low(log_t &log) {
   if (do_flush) {
     LOG_SYNC_POINT("log_flush_before_fsync");
 
+    // 调用底下filesystem 的 flush 操作
     fil_flush_file_redo();
   }
 
@@ -1903,6 +1914,8 @@ static void log_flush_low(log_t &log) {
 
   LOG_SYNC_POINT("log_flush_before_flushed_to_disk_lsn");
 
+  // flush 成功以后flushed_to_disk_lsn 就设置成flush_up_to_lsn
+  // 而flush_up_to_lsn 又是由 write_lsn 生成的
   log.flushed_to_disk_lsn.store(flush_up_to_lsn);
 
   /* Notify other thread(s). */
@@ -1936,6 +1949,7 @@ void log_flusher(log_t *log_ptr) {
 
   log_flusher_mutex_enter(log);
 
+  // log_flusher 卡在这个loop 里面
   for (uint64_t step = 0; log.writer_thread_alive.load(); ++step) {
     bool released = false;
 
@@ -2016,6 +2030,9 @@ void log_flusher(log_t *log_ptr) {
     MONITOR_INC_WAIT_STATS(MONITOR_LOG_FLUSHER_, wait_stats);
   }
 
+  // 从cond_timedwait 中唤醒, 然后判断write_lsn
+  // 是否比上一次的flushed_to_disk_lsn 要来的大, 如果大说明有新数据写入了,
+  // 那么就执行flush 操作
   if (log.write_lsn.load() > log.flushed_to_disk_lsn.load()) {
     log_flush_low(log);
   }
@@ -2146,6 +2163,7 @@ void log_flush_notifier(log_t *log_ptr) {
 
   log_flush_notifier_mutex_enter(log);
 
+  // log_flush thread 一直卡在这里
   for (uint64_t step = 0;; ++step) {
     if (!log.flusher_thread_alive.load()) {
       if (lsn > log.flushed_to_disk_lsn.load()) {
@@ -2188,6 +2206,10 @@ void log_flush_notifier(log_t *log_ptr) {
       max_spins = 0;
     }
 
+    // os_event_wait_for 最后会调用到条件变量的 pthread_cond_wait()
+    // 所以会卡在这里
+    // 这个os_event_wait_for 函数进来的时候在 while
+    // 循环里面就会去执行stop_condition 做检查
     const auto wait_stats =
         os_event_wait_for(log.flush_notifier_event, max_spins,
                           srv_log_flush_notifier_timeout, stop_condition);
@@ -2196,11 +2218,16 @@ void log_flush_notifier(log_t *log_ptr) {
 
     LOG_SYNC_POINT("log_flush_notifier_before_flushed_to_disk_lsn");
 
+    // 这里这个flushed_to_disk_lsn 是新的flushed_to_disk_lsn
     const lsn_t flush_lsn = log.flushed_to_disk_lsn.load();
 
     const lsn_t notified_up_to_lsn =
         ut_uint64_align_up(flush_lsn, OS_FILE_LOG_BLOCK_SIZE);
 
+    // 这里lsn 是上一次的flushed_to_disk_lsn
+    // notified_up_to_lsn 是从cond_wait 醒来以后的lsn
+    // 所以判断一下这次醒来是超时还是缺少有新的数据已经被flush 了
+    // 如果有新的数据被flush 了, 则应该通知一下等待的线程了
     while (lsn <= notified_up_to_lsn) {
       const auto slot =
           (lsn - 1) / OS_FILE_LOG_BLOCK_SIZE & (log.flush_events_size - 1);
@@ -2209,6 +2236,8 @@ void log_flush_notifier(log_t *log_ptr) {
 
       LOG_SYNC_POINT("log_flush_notifier_before_notify");
 
+      // 这个函数最后会调用到pthread_cond_signal()
+      // 或者pthread_cond_broadcast()
       os_event_set(log.flush_events[slot]);
     }
 
@@ -2286,6 +2315,8 @@ void log_closer(log_t *log_ptr) {
       max_spins = 0;
     }
 
+    // 这里log_closer thread 一直等待在这里, 这个max_spins 只是底下
+    // spin 的次数而已, 控制着sleep 的频率
     ut_wait_for(max_spins, srv_log_closer_timeout, stop_condition);
 
     /* Check if we should close the thread. */

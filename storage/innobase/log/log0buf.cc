@@ -1145,6 +1145,15 @@ bool log_advance_dirty_pages_added_up_to_lsn(log_t &log) {
     return (false);
   };
 
+  /*
+   * 从recent_closed.m_tail 一直往下找, 只要有连续的就串到一起, 直到
+   * 找到有空洞的为止
+   * 只要找到数据, 就更新m_tail 到最新的位置, 然后返回true
+   * 一条数据都没有返回false
+   * 注意: 在advance_tail_until 操作里面, 本身同时会进行的操作就是回收之前的空间
+   * 所以执行完advance_tail_until 以后, 连续的内存就会被释放出来了
+   * 下面还有validate_no_links 函数进行检查是否释放正确
+   */
   if (log.recent_closed.advance_tail_until(stop_condition)) {
     LOG_SYNC_POINT("log_advance_dpa_before_reclaim");
 
@@ -1155,6 +1164,14 @@ bool log_advance_dirty_pages_added_up_to_lsn(log_t &log) {
       /* All links between ready_lsn and lsn have
       been traversed. The slots can't be re-used
       before we updated the tail. */
+      // 这一步在上一步进行了 advance_tail_until 操作, 并返回了true 以后
+      // 这里再增加一次检查, 是否m_links[] 数组都清楚干净了
+      // log_buffer_dirty_pages_added_up_to_lsn
+      // 在validate_no_links 里面有
+      //   end = std::min(end, begin + m_capacity);
+      // 说明这个recent_closed 是一个环进行组织的, 在里面
+      // previous_lsn 是start, log_buffer_dirty_pages_added_up_to_lsn(log))
+      // 是end, 然后检查这个区间的recent_closed 里面的Link 是否都清空了
       log.recent_closed.validate_no_links(
           previous_lsn, log_buffer_dirty_pages_added_up_to_lsn(log));
     }

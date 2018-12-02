@@ -258,6 +258,15 @@ struct log_t {
       values (lsn belonging to the same log block). Note that false
       wake-ups are possible, in which case user threads simply retry
       waiting. */
+      // 这里可以理解成log_t 中提前申请了一组的条件变量, 为什么这么做? 
+      // 其实相当于hash 因为, 让不同的线程等在不同的os_event上,
+      // 这样一个操作完成, 需要唤醒的时候, 就不会把所有的线程都唤醒了,
+      // 这里分slot 的方法是
+      // const auto slot =
+      //           (lsn - 1) / OS_FILE_LOG_BLOCK_SIZE &
+      //           (log.flush_events_size - 1);
+      //
+      // 
       os_event_t *flush_events;
 
   /** Number of entries in the array with events. */
@@ -471,6 +480,9 @@ struct log_t {
 
   /** Size of the log buffer expressed in number of total bytes,
   that is including bytes for headers and footers of log blocks. */
+	// 这个是redo log 的log buffer 的大小, 外面的参数是 innodb_log_buffer_size,
+  // 这个值的默认大小是8MB. 这个线上一般配置的大小
+  // innodb_log_buffer_size = 64M
   size_t buf_size;
 
   /** Capacity of the log files in total, expressed in number of
