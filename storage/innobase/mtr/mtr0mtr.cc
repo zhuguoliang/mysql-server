@@ -637,6 +637,9 @@ void mtr_t::Command::execute() {
 
     write_log.m_left_to_write = len;
 
+    // 这里是将redo log 改成并行化以后, 需要的操作,
+    // 先从redolog 里面的recent_writtern 里面预留出一部分的空间
+    // 在这个函数里面也会设定这个 Loghandle 的start_lsn, end_lsn
     auto handle = log_buffer_reserve(*log_sys, len);
 
     write_log.m_handle = handle;
@@ -651,10 +654,14 @@ void mtr_t::Command::execute() {
     ut_ad(write_log.m_left_to_write == 0);
     ut_ad(write_log.m_lsn == handle.end_lsn);
 
+    // 这里会想进去判断redo log 的recent_written buffer 里面有没有空间了
+    // 如果没有空间, 就sleep 20ms
     log_wait_for_space_in_log_recent_closed(*log_sys, handle.start_lsn);
 
     DEBUG_SYNC_C("mtr_redo_before_add_dirty_blocks");
 
+    // 所以在mtr->commit 阶段, 就已经把已经修改的page 加到对应的flush_list 上了
+    // 只不过还没有去唤醒对应的flusher 线程
     add_dirty_blocks_to_flush_list(handle.start_lsn, handle.end_lsn);
 
     log_buffer_close(*log_sys, handle);

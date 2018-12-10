@@ -1947,6 +1947,9 @@ void trx_commit_low(
     number and a bigger commit lsn than T1. */
 
     /*--------------*/
+    // TODO(baotiao): 这里为什么需要先执行一下mtr_commit()
+    // 这里做的事情其实就是把mtr 内存里面的内容拷贝到redo log 的buffer pool 里面
+    // 但是这里并不会触发去唤醒log_writer 线程
     mtr_commit(mtr);
 
     DBUG_EXECUTE_IF("ib_crash_during_trx_commit_in_mem",

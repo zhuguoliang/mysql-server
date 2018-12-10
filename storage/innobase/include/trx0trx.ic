@@ -193,6 +193,15 @@ ok:
 UNIV_INLINE
 bool trx_is_redo_rseg_updated(const trx_t *trx) /*!< in: transaction */
 {
+  /*
+   * 这里resegs 主要包含两个变量
+   * m_redo, m_noredo
+   * rsegs 是transaction 里面的undo log 段, 所以
+   * m_redo 里面包含的是这段undo log 里面记录的内容, 在recovery
+   * 的时候需要进行重放的
+   * m_noredo 里面包含的这段是recovery 的时候不需要重放的, 那么trx
+   * 里面哪些需要重放, 哪些不需要重放呢? TODO?
+   */
   return (trx->rsegs.m_redo.insert_undo != 0 ||
           trx->rsegs.m_redo.update_undo != 0);
 }

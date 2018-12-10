@@ -1096,6 +1096,9 @@ bool log_advance_ready_for_write_lsn(log_t &log) {
 
   ut_a(previous_lsn >= write_lsn);
 
+  // 这里recent_writtern 的做法和recent_closed 的做法基本一样
+  // 在这个advance_tail_until 函数里面, 会把找到这个link_buf
+  // 连续的最后一个节点的位置, 然后把这之间的指针清空, 并且更新m_tail 的位置
   if (log.recent_written.advance_tail_until(stop_condition)) {
     LOG_SYNC_POINT("log_advance_ready_for_write_before_update");
 

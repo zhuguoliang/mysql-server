@@ -1412,6 +1412,8 @@ static void log_files_write_buffer(log_t &log, byte *buffer, size_t buffer_size,
 
   bool write_from_log_buffer;
 
+
+  // 这个地方主要是操作write_ahead buffer 的地方
   auto write_size = compute_how_much_to_write(log, real_offset, buffer_size,
                                               write_from_log_buffer);
 
@@ -1537,6 +1539,8 @@ static void log_writer_write_buffer(log_t &log, lsn_t next_write_lsn) {
   lsn_t archiver_limited_lsn = LSN_MAX;
   lsn_t min_next_lsn = last_write_lsn + OS_FILE_LOG_BLOCK_SIZE;
 
+	// 为什么需要在log_writer 的过程加入这个逻辑, 这个逻辑是判断lsn_diff(当前这次要写入的数据的大小) 是否超过了log.lsn_capacity(redolog 的剩余容量大小), 如果比它小, 那么就可以直接进行写入操作, 就break 出去, 如果比它大, 那么说明如果这次写入写下去的话, 因为redolog 是rotate 形式的, 会把当前的redolog 给写坏, 所以必须先进行一次checkpoint, 把一部分的redolog 中的内容flush 到btree data中, 然后把这个checkpoint 点增加, 腾出空间.
+	// 所以我们看到如果checkpoint 做的不够及时, 会导致redolog 空间不够, 然后直接影响到线上的写入线程.
   while (true) {
     lsn_t checkpoint_lsn = log.last_checkpoint_lsn.load();
 
@@ -1749,6 +1753,10 @@ void log_writer(log_t *log_ptr) {
       return (false);
     };
 
+    /*
+     * 这里这个srv_log_writer_spin_delay = 2.5s
+     * 也就是在os_event_wait_for 里面会先spin 2.5s 然后再进入sleep 状态
+     */
     auto max_spins = srv_log_writer_spin_delay;
 
     if (srv_cpu_usage.utime_abs < srv_log_spin_cpu_abs_lwm) {
@@ -1763,6 +1771,7 @@ void log_writer(log_t *log_ptr) {
     /* Do the actual work. */
     // ready_lsn 是目前通过link_buf 检查, 连续的一块log buffer
     // 可以把着一块的内容刷到 redo log 上
+    // 这里log_writer_write_buffer 是要执行刷buffer 的地方
     if (log.write_lsn.load() < ready_lsn) {
       log_writer_write_buffer(log, ready_lsn);
 
