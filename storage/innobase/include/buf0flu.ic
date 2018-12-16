@@ -53,6 +53,7 @@ void buf_flush_insert_sorted_into_flush_list(
 /** This function should be called at a mini-transaction commit, if a page was
  modified in it. Puts the block to the list of modified blocks, if it is not
  already in it. */
+// 这个函数是具体的把page 加到这个flush list上, 并且设置这个page 的lsn 的地方
 UNIV_INLINE
 void buf_flush_note_modification(
     buf_block_t *block,      /*!< in: block which is modified */
@@ -81,6 +82,7 @@ void buf_flush_note_modification(
 
   if (end_lsn != 0) {
     ut_ad(block->page.newest_modification <= end_lsn);
+    // 所以newest_modification 会被设置成这次mtr 的整体的end_lsn
     block->page.newest_modification = end_lsn;
   } else {
     /* Do nothing. This is the case with no-redo mtr and it

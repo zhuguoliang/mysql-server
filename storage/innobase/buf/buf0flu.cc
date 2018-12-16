@@ -635,6 +635,7 @@ void buf_flush_insert_sorted_into_flush_list(
   before the last page was hooked up in the flush_list by the
   io-handler thread. In that case we'll just do a simple
   linear search in the else block. */
+  // 所以这里的意思是如果使用了 flush_rbt 就不使用 flush_list 了.
   if (buf_pool->flush_rbt != NULL) {
     prev_b = buf_flush_insert_in_flush_rbt(&block->page);
 

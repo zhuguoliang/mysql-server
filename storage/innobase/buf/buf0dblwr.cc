@@ -472,6 +472,7 @@ dberr_t buf_dblwr_init_or_load_pages(pfs_os_file_t file, const char *path) {
 @param[in,out]	space		Tablespace instance to write to
 @param[in]	page_no		Page number in the tablespace
 @param[in]	page		Page data to write */
+// 这个函数处理的是double buffer 上面有没有最后一个要写入的page 是否需要recovery
 static void buf_dblwr_recover_page(page_no_t page_no_dblwr, fil_space_t *space,
                                    page_no_t page_no, const page_t *page) {
   byte *ptr;

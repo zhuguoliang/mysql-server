@@ -362,6 +362,8 @@ struct recv_dblwr_t {
 
 /** Class to parse persistent dynamic metadata redo log, store and
 merge them and apply them to in-memory table objects finally */
+// 这个是Matadata 走InnoDB 以后加入的逻辑
+// 所以这是8.0 才有的逻辑
 class MetadataRecover {
   using PersistentTables = std::map<
       table_id_t, PersistentTableMetadata *, std::less<table_id_t>,

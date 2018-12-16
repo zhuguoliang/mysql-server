@@ -2132,6 +2132,10 @@ files_checked:
     /* We always try to do a recovery, even if the database had
     been shut down normally: this is the normal startup path */
 
+    /*
+     * 这里是InnoDB recovery 开始的地方, 前面有recv_sys_create() 以及init
+     * 而finish 是对应的结束的地方
+     */
     err = recv_recovery_from_checkpoint_start(*log_sys, flushed_lsn);
 
     recv_sys->dblwr.pages.clear();

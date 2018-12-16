@@ -59,6 +59,7 @@ static_assert(static_cast<int>(MTR_MEMO_PAGE_SX_FIX) ==
               "");
 
 /** Iterate over a memo block in reverse. */
+// TODO: 为什么这里要反向的遍历
 template <typename Functor>
 struct Iterate {
   /** Release specific object */
@@ -250,6 +251,8 @@ struct Add_dirty_blocks_to_flush_list {
 
     block = reinterpret_cast<buf_block_t *>(slot->object);
 
+    // 由于对整个mtr_t 遍历的时候都使用的是这个mtr 产生的start_lsn, end_lsn
+    // 所以如果这次修改了多个page, 这几个page 的lsn 都是一样的
     buf_flush_note_modification(block, m_start_lsn, m_end_lsn,
                                 m_flush_observer);
 #endif /* !UNIV_HOTBACKUP */
@@ -617,8 +620,14 @@ void mtr_t::Command::add_dirty_blocks_to_flush_list(lsn_t start_lsn,
   Add_dirty_blocks_to_flush_list add_to_flush(start_lsn, end_lsn,
                                               m_impl->m_flush_observer);
 
+  // Iterate 是专门给m_memo 定义的一个Iterator 类型
+  // 不过这里遍历的时候, 是反向遍历的
   Iterate<Add_dirty_blocks_to_flush_list> iterator(add_to_flush);
 
+  // m_memo 是dyn_buf_t<DYN_ARRAY_DATA_SIZE> 类型, 而dyn_buf_t 有一个
+  // for_each_block_in_reverse 的方法
+  // 这里m_memo 相当于 512字节组成的动态扩展的数组
+  // 对m_memo 里面的每一个block 执行iterator 里面的add_to_flush 方法
   m_impl->m_memo.for_each_block_in_reverse(iterator);
 }
 
@@ -662,6 +671,7 @@ void mtr_t::Command::execute() {
 
     // 所以在mtr->commit 阶段, 就已经把已经修改的page 加到对应的flush_list 上了
     // 只不过还没有去唤醒对应的flusher 线程
+    // 这里传进去的是这次mtr 修改过的lsn的开始和结束
     add_dirty_blocks_to_flush_list(handle.start_lsn, handle.end_lsn);
 
     log_buffer_close(*log_sys, handle);

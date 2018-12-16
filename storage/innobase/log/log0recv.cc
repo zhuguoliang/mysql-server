@@ -991,10 +991,15 @@ static MY_ATTRIBUTE((warn_unused_result)) dberr_t
 
   log.state = log_state_t::CORRUPTED;
 
+  /*
+   * 这里header = 0, 所以page_num = 0, 那么就是去读第一个redo log 文件
+   */
   log_files_header_read(log, 0);
 
   /* Check the header page checksum. There was no
   checksum in the first redo log format (version 0). */
+  // 这里说明第一个redo log 文件4字节 LOG_HREADER_FORMAT,
+  // 然后是
   log.format = mach_read_from_4(buf + LOG_HEADER_FORMAT);
 
   if (log.format != 0 && !recv_check_log_header_checksum(buf)) {
@@ -1238,6 +1243,9 @@ void recv_apply_hashed_log_recs(log_t &log, bool allow_ibuf) {
   for (const auto &space : *recv_sys->spaces) {
     bool dropped;
 
+    // 如果这个sapce 不是 TRX_SYS_SPACE, 也就是系统默认的表空间0
+    // 并且这个spaceid 没有添加到open_for_recovery
+    // 那么就不需要从undo log 里面去恢复他
     if (space.first != TRX_SYS_SPACE &&
         !fil_tablespace_open_for_recovery(space.first)) {
       /* Tablespace was dropped. */
@@ -1255,6 +1263,7 @@ void recv_apply_hashed_log_recs(log_t &log, bool allow_ibuf) {
         pages.second->state = RECV_DISCARDED;
       }
 
+      // 这里是具体从undo 里面找出一个page, 然后将其apply 的地方
       recv_apply_log_rec(pages.second);
 
       ++applied;
@@ -3101,10 +3110,15 @@ bool meb_scan_log_recs(
   do {
     ut_ad(!finished);
 
+    // 将这个log buffer的前4字节 block number 读取出来
     ulint no = log_block_get_hdr_no(log_block);
 
+    // 将lsn 转化成number, 因为这个block number 也是递增的
+    // 其实就是 lsn / 512 就可以了
     ulint expected_no = log_block_convert_lsn_to_no(scanned_lsn);
 
+    // 下面几个步骤都是检验读取出来的 redolog 有没有异常
+    // 这里检验的是存在里面的number 和 根据lsn 算出来的number 是否一致
     if (no != expected_no) {
       /* Garbage or an incompletely written log block.
 
@@ -3118,6 +3132,7 @@ bool meb_scan_log_recs(
       break;
     }
 
+    // 这里检查的是checksum 是否一致
     if (!log_block_checksum_is_ok(log_block)) {
       ib::error(ER_IB_MSG_720, no, scanned_lsn,
                 log_block_get_checksum(log_block),
@@ -3194,6 +3209,8 @@ bool meb_scan_log_recs(
         those records and that's why we need a counter
         of bytes to ignore. */
 
+        // 这里parse_start_lsn 就是从redolog block 里面读取出来的
+        // first record offset
         recv_sys->bytes_to_ignore_before_checkpoint =
             recv_sys->checkpoint_lsn - recv_sys->parse_start_lsn;
 
@@ -3287,6 +3304,10 @@ bool meb_scan_log_recs(
 
 #ifndef UNIV_HOTBACKUP
     if (recv_heap_used() > max_memory) {
+      // 在执行这个函数的时候说明遇到了corrupt, 需要将undo 中的日志回放到btree
+      // 中, 这里可以看到对redo 的处理, 只是把checkpoint 之后的redolog
+      // 加到buffer pool 里面, 然后让线程将buffer pool 中的内容刷到btree.
+      // 只有Undo log 中的内容才会调用recv_apply 将其直接apply 到btree data中
       recv_apply_hashed_log_recs(log, false);
     }
 #endif /* !UNIV_HOTBACKUP */
@@ -3338,9 +3359,7 @@ static void recv_read_log_seg(log_t &log, byte *buf, lsn_t start_lsn,
     const page_no_t page_no =
         static_cast<page_no_t>(source_offset / univ_page_size.physical());
 
-    dberr_t
-
-        err = fil_redo_io(
+    dberr_t err = fil_redo_io(
             IORequestLogRead, page_id_t(log.files_space_id, page_no),
             univ_page_size, (ulint)(source_offset % univ_page_size.physical()),
             len, buf);
@@ -3404,6 +3423,9 @@ static void recv_recovery_begin(log_t &log, lsn_t *contiguous_lsn) {
   while (!finished) {
     lsn_t end_lsn = start_lsn + RECV_SCAN_SIZE;
 
+    // 根据lsn_t 从redo log file 里面读取数据到 log.buf
+    // 所以会先从lsn_t 转化到 file offset 的过程
+    // 这里同时也会将从start_lsn => end_lsn 的内容读取到 redolog buffer
     recv_read_log_seg(log, log.buf, start_lsn, end_lsn);
 
     finished = recv_scan_log_recs(log, max_mem, log.buf, RECV_SCAN_SIZE,
@@ -3427,8 +3449,12 @@ static void recv_init_crash_recovery() {
   ib::info(ER_IB_MSG_726);
   ib::info(ER_IB_MSG_727);
 
+  // 这里是处理上一次关闭或者crash 以后, 是否有正在要写的page 还留在 double
+  // write buffer 里面, double write buffer 是用来保证每次写4k page 的完整性
   buf_dblwr_process();
 
+  // 将dirty page 从buffer pool flush 到btree, 之前已经把相应的page
+  // 都加载到buffer pool 了
   if (srv_force_recovery < SRV_FORCE_NO_LOG_REDO) {
     /* Spawn the background thread to flush dirty pages
     from the buffer pools. */
@@ -3592,6 +3618,7 @@ dberr_t recv_recovery_from_checkpoint_start(log_t &log, lsn_t flush_lsn) {
 
   contiguous_lsn = checkpoint_lsn;
 
+  // 这里是recv_sys 入口的地方
   recv_recovery_begin(log, &contiguous_lsn);
 
   lsn_t recovered_lsn;
@@ -3637,6 +3664,8 @@ dberr_t recv_recovery_from_checkpoint_start(log_t &log, lsn_t flush_lsn) {
            OS_FILE_LOG_BLOCK_SIZE);
   }
 
+  // 到了log_start 是把之前的初始化工作都做好了, 然后初始化redolog log_t
+  // 这个结构体里面的变量了
   log_start(log, checkpoint_no + 1, checkpoint_lsn, recovered_lsn);
 
   /* Copy the checkpoint info to the log; remember that we have

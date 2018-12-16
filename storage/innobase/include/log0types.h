@@ -488,7 +488,8 @@ struct log_t {
   /** Capacity of the log files in total, expressed in number of
   data bytes, that is excluding bytes for headers and footers of
   log blocks. */
-  // sn_capacity 指的是redo log 所能存储的最大的数据量, 不包括
+  // sn_capacity 指的是当前redo log 系统还能存储的最大的数据大小,
+  // 这个值在写入的时候在减少, 在做checkpoint, 把旧数据flush 下去以后会增加, 不包括
   // header, footer 等信息
   lsn_t sn_capacity;
 

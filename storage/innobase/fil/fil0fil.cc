@@ -8782,6 +8782,17 @@ bool fil_op_replay_rename_for_ddl(const page_id_t &page_id,
 /** Lookup the tablespace ID for recovery and DDL log apply.
 @param[in]	space_id		Tablespace ID to lookup
 @return true if the space ID is known. */
+// 在这个函数里面确定这个space_id 是否在recv_sys 里面的deleted, missing_ids  里面
+// 在recovery 初始化阶段, 就会把所有的space_id 放在对应的list 里面
+// 如果在这个delete list 里面, 说明是之前被删除过的, 就不需要处理了
+// 这里recv_sys 里面有两个list  Missing_Ids deleted, Missing_Ids missing_ids
+/*
+  // Tablespace IDs that were ignored during redo log apply.
+  Missing_Ids missing_ids;
+
+  // Tablespace IDs that were explicitly deleted.
+  Missing_Ids deleted;
+  */
 bool Fil_system::lookup_for_recovery(space_id_t space_id) {
   ut_ad(recv_recovery_is_on() || Log_DDL::is_in_recovery());
 
