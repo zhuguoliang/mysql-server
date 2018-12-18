@@ -1476,6 +1476,11 @@ class Fil_system {
   /** Free the data structures required for recovery. */
   void free_scanned_files() { m_dirs.clear(); }
 
+  void show_dirs() {
+    std::string tmp = m_dirs.get_dirs();
+    fprintf(stderr, "baotiao system tablespace\n %s\n", tmp.c_str());
+  }
+
 #ifdef UNIV_HOTBACKUP
   /** Extends all tablespaces to the size stored in the space header.
   During the mysqlbackup --apply-log phase we extended the spaces

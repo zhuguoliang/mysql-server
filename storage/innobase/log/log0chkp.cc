@@ -380,6 +380,8 @@ static lsn_t log_determine_checkpoint_lsn(log_t &log) {
   }
 }
 
+// 这个函数是写入checkpoint 的地方, 这里可以看到虽然对于512 字节的文件
+// checkpoint 是写不满的, 但是仍然回去写checksum 的相关信息
 void log_files_write_checkpoint(log_t &log, lsn_t next_checkpoint_lsn) {
   ut_ad(log_checkpointer_mutex_own(log));
   ut_a(!srv_read_only_mode);
