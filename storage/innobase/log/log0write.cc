@@ -2452,14 +2452,10 @@ void log_closer(log_t *log_ptr) {
       max_spins = 0;
     }
 
-<<<<<<< HEAD
     // 这里log_closer thread 一直等待在这里, 这个max_spins 只是底下
     // spin 的次数而已, 控制着sleep 的频率
-    ut_wait_for(max_spins, srv_log_closer_timeout, stop_condition);
-=======
     os_event_wait_for(log.closer_event, max_spins, srv_log_closer_timeout,
                       stop_condition);
->>>>>>> e4924f36486f971f8a04252e01c803457a2c72f7
 
     /* Check if we should close the thread. */
     if (log.should_stop_threads.load() && !log.flusher_thread_alive.load() &&

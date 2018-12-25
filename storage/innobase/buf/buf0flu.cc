@@ -168,6 +168,8 @@ struct page_cleaner_t {
                             in existence */
   bool requested;           /*!< true if requested pages
                             to flush */
+  // 这里由这个lsn_limit 控制着dirty page flush 的时候, 所能够flush 最大的Lsn,
+  // 这个lsn 设置的是当前redo log 已经写的最大的lsn
   lsn_t lsn_limit;          /*!< upper limit of LSN to be
                             flushed */
   ulint n_slots;            /*!< total number of slots */
@@ -2694,6 +2696,8 @@ static ulint pc_flush_slot(void) {
     page_cleaner_slot_t *slot = NULL;
     ulint i;
 
+    // 这里slot->state == PAGE_CLEANER_STATE_REQUESTED 是在pc_request()
+    // 这个函数里面将这个slot 的状态设置成这个的
     for (i = 0; i < page_cleaner->n_slots; i++) {
       slot = &page_cleaner->slots[i];
 

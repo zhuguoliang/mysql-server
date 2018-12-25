@@ -176,6 +176,12 @@ class Link_buf {
   /** Pointer to the ring buffer (unaligned). */
   std::atomic<Distance> *m_links;
 
+  /*
+   * 从底下的advance_tail_until 的实现可以看出, 这个m_tail 就是指向
+   * 这个buffer 里面最开始的那个位置, 因为这里是一个轮询使用的Buffer. 
+   * 在 advance_tail_until 的时候, 一开始的位置就是
+   * position = m_tail
+   */
   /** Tail pointer in the buffer (expressed in original unit). */
   alignas(INNOBASE_CACHE_LINE_SIZE) std::atomic<Position> m_tail;
 };

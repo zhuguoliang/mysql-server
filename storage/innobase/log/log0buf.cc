@@ -771,6 +771,10 @@ lsn_t log_buffer_write(log_t &log, const Log_handle &handle, const byte *str,
   /* Copy log records to the reserved space in the log buffer.
   Decrease number of bytes to copy (str_len) after some are
   copied. Proceed until number of bytes to copy reaches zero. */
+  // 前面设定好start_lsn 以后, 这里一个block, 一个block 将mtr
+  // 里面的内容拷贝到log buffer 里面, 进入以后会先处理如果这个Log buffer
+  // 之前就已经写了一部分数据, 需要跳过前面这一段
+  // 然后就是很细的计算LOG_BLOCK HEADER, TAILER 等等细节了
   while (true) {
     /* Calculate offset from the beginning of log block. */
     const auto offset = lsn % OS_FILE_LOG_BLOCK_SIZE;
@@ -787,6 +791,8 @@ lsn_t log_buffer_write(log_t &log, const Log_handle &handle, const byte *str,
 
     size_t len, lsn_diff;
 
+    // 这里是如果当前这个log block 剩下的空间, 比这次要写入的数据的大小要大
+    // 那么就直接写入, 所以memcpy的时候的len 就等于这个字符串的str_len
     if (left > str_len) {
       /* There are enough free bytes to finish copying
       the remaining part, leaving at least single free
@@ -797,6 +803,9 @@ lsn_t log_buffer_write(log_t &log, const Log_handle &handle, const byte *str,
       lsn_diff = str_len;
 
     } else {
+      // 如果这次要写入的内容超过了当前这个log block 剩下的空间,
+      // 那么就先把当前这个Block 写满, 剩下的下次写.
+      // 所以memcpy时候的Len 就等待当前这个log block 剩下的空间len
       /* We have more to copy than the current log block
       has remaining data bytes, or exactly the same.
 
@@ -855,6 +864,8 @@ lsn_t log_buffer_write(log_t &log, const Log_handle &handle, const byte *str,
                OS_FILE_LOG_BLOCK_SIZE ==
            0);
 
+      // 这里要设置log block 里面的First record offset 这个值, 把他初始化成0,
+      // 如果是一个新的Block 的话
       log_block_set_first_rec_group(
           reinterpret_cast<byte *>(uintptr_t(ptr) &
                                    ~uintptr_t(LOG_BLOCK_HDR_SIZE)),
