@@ -2746,6 +2746,8 @@ static bool recv_single_rec(byte *ptr, byte *end_ptr) {
   page_no_t page_no;
   space_id_t space_id;
 
+  // 先parse 出type, space_id, page_no, body 这些东西
+  // 然后才是去parse body
   ulint len =
       recv_parse_log_rec(&type, ptr, end_ptr, &space_id, &page_no, &body);
 
@@ -3142,6 +3144,7 @@ bool meb_scan_log_recs(
   ut_ad(len % OS_FILE_LOG_BLOCK_SIZE == 0);
   ut_ad(len >= OS_FILE_LOG_BLOCK_SIZE);
 
+  // 这里做的事情就是从 start_lsn 一直扫redo log, 扫的长度为len 的过程
   do {
     ut_ad(!finished);
 
@@ -3287,6 +3290,8 @@ bool meb_scan_log_recs(
       parsing buffer if parse_start_lsn is already
       non-zero */
 
+      // TODO(baotiao): 这里为什么len + 4 * OS_FILE_LOG_BLOCK_SIZE
+      // 就可以判断说有 corrupt_log 了
       if (recv_sys->len + 4 * OS_FILE_LOG_BLOCK_SIZE >= recv_sys->buf_len) {
         if (!recv_sys_resize_buf()) {
           recv_sys->found_corrupt_log = true;
@@ -3653,7 +3658,8 @@ dberr_t recv_recovery_from_checkpoint_start(log_t &log, lsn_t flush_lsn) {
 
   contiguous_lsn = checkpoint_lsn;
 
-  // 这里是recv_sys 入口的地方
+  // 这个是recovery 流程最核心的函数
+  // 这里接下来一个redo block 一个redo block 去解析, 去recovery
   recv_recovery_begin(log, &contiguous_lsn);
 
   lsn_t recovered_lsn;
