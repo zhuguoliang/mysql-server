@@ -124,6 +124,9 @@ ulint trx_rsegf_undo_find_free(
 #endif
 
   for (i = 0; i < max_slots; i++) {
+    // 从rollback segment 里面的这个位置rsegf + TRX_RSEG_UNDO_SLOTS + n * TRX_RSEG_SLOT_SIZE
+    // 读出这个TRX_RSEG_UNDO_SLOTS 里面保存的page num
+    // 如果这个page_no 是空的, 就把这个page num 返回了
     page_no = trx_rsegf_get_nth_undo(rsegf, i, mtr);
 
     if (page_no == FIL_NULL) {

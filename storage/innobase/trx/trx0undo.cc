@@ -411,8 +411,13 @@ static MY_ATTRIBUTE((warn_unused_result)) dberr_t trx_undo_seg_create(
   /*	fputs(type == TRX_UNDO_INSERT
   ? "Creating insert undo log segment\n"
   : "Creating update undo log segment\n", stderr); */
+  // 从当前这个rollback segment 里面找找有没有空闲的slot
+  // 从这里可以看出trx_undo_t 对应着唯一一个的
+  // Undo Log Header Page
   slot_no = trx_rsegf_undo_find_free(rseg_hdr, mtr);
 
+  // 这里如果从这个rollback segment 上找不到空闲的trx_undo_t, 就说明这个rollback
+  // segment 已经被用完了, 说明有太多的活跃事务了
   if (slot_no == ULINT_UNDEFINED) {
     ib::warn(ER_IB_MSG_1212) << "Cannot find a free slot for an undo log. Do"
                                 " you have too many active transactions running"
@@ -421,14 +426,18 @@ static MY_ATTRIBUTE((warn_unused_result)) dberr_t trx_undo_seg_create(
     return (DB_TOO_MANY_CONCURRENT_TRXS);
   }
 
+  // 从rseg_hdr 中找到这个16kb page 的头
+  // 然后再从头上面的38字节读出space id
   space = page_get_space_id(page_align(rseg_hdr));
 
+  // 从 fsp 上面去获得free extents
   success = fsp_reserve_free_extents(&n_reserved, space, 2, FSP_UNDO, mtr);
   if (!success) {
     return (DB_OUT_OF_FILE_SPACE);
   }
 
   /* Allocate a new file segment for the undo log */
+  // 上面申请完extents, 这里从extents 里面申请undo log segment page
   block = fseg_create_general(space, 0, TRX_UNDO_SEG_HDR + TRX_UNDO_FSEG_HEADER,
                               TRUE, mtr);
 

@@ -1292,6 +1292,7 @@ This is specialized function used for intrinsic table with reduce branching.
 @param[in,out]	row		row where field values are copied.
 @param[in]	prebuilt	prebuilt handler
 @param[in]	mysql_rec	row in mysql format. */
+// 这里将row 是Mysql 里面的格式转换成了InnoDB 能够识别的row 格式
 static void row_mysql_to_innobase(dtuple_t *row, row_prebuilt_t *prebuilt,
                                   const byte *mysql_rec) {
   ut_ad(prebuilt->table->is_intrinsic());

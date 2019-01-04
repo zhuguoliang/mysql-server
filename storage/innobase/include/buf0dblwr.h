@@ -109,8 +109,11 @@ void buf_dblwr_recover_pages(fil_space_t *space);
 struct buf_dblwr_t {
   ib_mutex_t mutex;           /*!< mutex protecting the first_free
                               field and write_buf */
+  // 这里double write buffer 应该总共大小是2M
+  // 其中block1 有64 pages, 一个pages 大小是16k 那么就是64 * 16k = 1024k = 1M
   page_no_t block1;           /*!< the page number of the first
                               doublewrite block (64 pages) */
+  // 然后block2 大小和Block1 大小是一样的
   page_no_t block2;           /*!< page number of the second block */
   page_no_t first_free;       /*!< first free position in write_buf
                            measured in units of UNIV_PAGE_SIZE */

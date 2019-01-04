@@ -982,6 +982,7 @@ void buf_flush_init_for_writing(const buf_block_t *block, byte *page,
   /* Write the newest modification lsn to the page header and trailer */
   ut_ad(skip_lsn_check || mach_read_from_8(page + FIL_PAGE_LSN) <= newest_lsn);
 
+  // 这里page 就是最后要刷到btree page 里面的page
   mach_write_to_8(page + FIL_PAGE_LSN, newest_lsn);
 
   mach_write_to_8(page + UNIV_PAGE_SIZE - FIL_PAGE_END_LSN_OLD_CHKSUM,
@@ -1161,6 +1162,8 @@ static void buf_flush_write_block_low(buf_page_t *bpage, buf_flush_t flush_type,
         frame = ((buf_block_t *)bpage)->frame;
       }
 
+      // 这一步已经把相应的page 在内存里面的结构整理好了, 比如写了header,
+      // checksum 等等信息
       buf_flush_init_for_writing(
           reinterpret_cast<const buf_block_t *>(bpage),
           reinterpret_cast<const buf_block_t *>(bpage)->frame,
@@ -1174,6 +1177,7 @@ static void buf_flush_write_block_low(buf_page_t *bpage, buf_flush_t flush_type,
   Given the nature and load of temporary tablespace doublewrite buffer
   adds an overhead during flushing. */
 
+  // 第一个分支是不走doublewrite_buf 的逻辑, 直接将这个page 写入到了btree page
   if (!srv_use_doublewrite_buf || buf_dblwr == NULL || srv_read_only_mode ||
       fsp_is_system_temporary(bpage->id.space())) {
     ut_ad(!srv_read_only_mode || fsp_is_system_temporary(bpage->id.space()));
@@ -1183,6 +1187,7 @@ static void buf_flush_write_block_low(buf_page_t *bpage, buf_flush_t flush_type,
     dberr_t err;
     IORequest request(type);
 
+    // 这里把上面组织好的page 写入到 btree page
     err = fil_io(request, sync, bpage->id, bpage->size, 0,
                  bpage->size.physical(), frame, bpage);
 

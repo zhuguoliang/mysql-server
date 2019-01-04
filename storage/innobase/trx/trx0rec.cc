@@ -2062,6 +2062,11 @@ dberr_t trx_undo_report_row_operation(
 
   mtr_start(&mtr);
 
+  // 这里undo_ptr 是从这个trx->rsegs 里面获得, 也就是trx 在进入要写
+  // trx_undo_report_row_operation 的时候, 就已经给这个trx 分配一个 
+  // rollback segment 了
+  // 总共有128 个rollback segment, 系统默认采取的就是简单的round-robin
+  // 的方式来进行分配
   if (is_temp_table) {
     /* If object is temporary, disable REDO logging that
     is done to track changes done to UNDO logs. This is

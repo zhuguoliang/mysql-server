@@ -214,6 +214,7 @@ segment */
 /* array of individual pages
 belonging to this segment in fsp
 fragment extent lists */
+// 这里FSP_EXTENT_SIZE 算出来是 64
 #define FSEG_FRAG_ARR_N_SLOTS (FSP_EXTENT_SIZE / 2)
 /* number of slots in the array for
 the fragment pages */
