@@ -465,9 +465,13 @@ static MY_ATTRIBUTE((warn_unused_result)) dberr_t trx_undo_seg_create(
 
   flst_init(seg_hdr + TRX_UNDO_PAGE_LIST, mtr);
 
+  // 这里将TRX_UNDO_PAGE_NODE 连到TRX_UNDO_PAGE_LIST 上
+  // 因为后续新的Normal Undo Page 里面的TRX_UNDO_PAGE_NODE
+  // 也会连到TRX_UNDO_PAGE_LIST 上
   flst_add_last(seg_hdr + TRX_UNDO_PAGE_LIST, page_hdr + TRX_UNDO_PAGE_NODE,
                 mtr);
 
+  // 将这个Undo Log Segment Page的页号写入到Rollback Segment 的Header Page 里面
   trx_rsegf_set_nth_undo(rseg_hdr, slot_no, page_get_page_no(*undo_page), mtr);
   *id = slot_no;
 
@@ -785,6 +789,8 @@ buf_block_t *trx_undo_add_page(
 
   trx_undo_page_init(new_page, undo->type, mtr);
 
+  // 申请完一个新page 以后, 把这个Normal undo page 加入到undo segment page list
+  // 里面的最后一个page
   flst_add_last(header_page + TRX_UNDO_SEG_HDR + TRX_UNDO_PAGE_LIST,
                 new_page + TRX_UNDO_PAGE_HDR + TRX_UNDO_PAGE_NODE, mtr);
   undo->size++;
@@ -822,14 +828,19 @@ static page_no_t trx_undo_free_page(
   header_page =
       trx_undo_page_get(page_id_t(space, hdr_page_no), rseg->page_size, mtr);
 
+  // 将Normal Undolog Page 从它所在的 Undolog segment Page 删除掉
+  // 这里可以看出删除的位置是将它的Normal 的TRX_UNDO_PAGE_NODE 从
+  // Undolog Segment Page 上的TRX_UNDO_PAGE_LIST 删除掉
   flst_remove(header_page + TRX_UNDO_SEG_HDR + TRX_UNDO_PAGE_LIST,
               undo_page + TRX_UNDO_PAGE_HDR + TRX_UNDO_PAGE_NODE, mtr);
 
+  // 将这个page 从所在的extent 上面free 操作
   fseg_free_page(header_page + TRX_UNDO_SEG_HDR + TRX_UNDO_FSEG_HEADER, space,
                  page_no, false, mtr);
 
   last_addr =
       flst_get_last(header_page + TRX_UNDO_SEG_HDR + TRX_UNDO_PAGE_LIST, mtr);
+  // 该rollback segment 对应的Undolog page--
   rseg->curr_size--;
 
   if (in_history) {
@@ -1348,6 +1359,7 @@ static MY_ATTRIBUTE((warn_unused_result)) dberr_t trx_undo_create(
   rseg_header =
       trx_rsegf_get(rseg->space_id, rseg->page_no, rseg->page_size, mtr);
 
+  // 这里undo_seg_create 指的是create Undo log segment page
   err = trx_undo_seg_create(rseg, rseg_header, type, &id, &undo_page, mtr);
 
   if (err != DB_SUCCESS) {
@@ -1509,6 +1521,7 @@ dberr_t trx_undo_assign_undo(
   }
 
   if (type == TRX_UNDO_INSERT) {
+    
     UT_LIST_ADD_FIRST(rseg->insert_undo_list, undo);
     ut_ad(undo_ptr->insert_undo == NULL);
     undo_ptr->insert_undo = undo;

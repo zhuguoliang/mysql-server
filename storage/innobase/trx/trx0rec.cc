@@ -446,6 +446,7 @@ static ulint trx_undo_page_report_insert(
 
   ut_ad(first_free <= UNIV_PAGE_SIZE);
 
+  // TODO 为什么是2 + 1 + 11 + 11
   if (trx_undo_left(undo_page, ptr) < 2 + 1 + 11 + 11) {
     /* Not enough space for writing the general parameters */
 
@@ -1150,6 +1151,7 @@ static ulint trx_undo_page_report_modify(
 
   first_free =
       mach_read_from_2(undo_page + TRX_UNDO_PAGE_HDR + TRX_UNDO_PAGE_FREE);
+  // 从这个undo page 的first_free 的地方开始写入内容
   ptr = undo_page + first_free;
 
   ut_ad(first_free <= UNIV_PAGE_SIZE);
@@ -2080,6 +2082,10 @@ dberr_t trx_undo_report_row_operation(
 
   mutex_enter(&trx->undo_mutex);
 
+  // 这里给这个undo page 分配磁盘上的位置, 一个undo log 对应一个Undo log segment
+  // page 分配的时候先通过 trx_undo_reuse_cached 看这个cache 里面是否有
+  // 没有的话执行trx_undo_create
+  // 然后下面就是插入这个undo page
   switch (op_type) {
     case TRX_UNDO_INSERT_OP:
       undo = undo_ptr->insert_undo;
@@ -2132,6 +2138,7 @@ dberr_t trx_undo_report_row_operation(
     undo_page = buf_block_get_frame(undo_block);
     ut_ad(page_no == undo_block->page.id.page_no());
 
+    // 这里是具体插入一条Undo log record 的地方
     switch (op_type) {
       case TRX_UNDO_INSERT_OP:
         offset = trx_undo_page_report_insert(undo_page, trx, index, clust_entry,
@@ -2144,6 +2151,9 @@ dberr_t trx_undo_report_row_operation(
                                         update, cmpl_info, clust_entry, &mtr);
     }
 
+    // 这里是如果这个record 在这个page 里面放不下, 那么需要将已经写入的页删除掉
+    // TODO(baotiao) 这里有一个疑问, 为什么放不下不放下一个连续的page, 这样的话
+    // 一条最大的Undo 岂不是只有16kb了
     if (UNIV_UNLIKELY(offset == 0)) {
       /* The record did not fit on the page. We erase the
       end segment of the undo log page and write a log
@@ -2197,6 +2207,11 @@ dberr_t trx_undo_report_row_operation(
 
       mutex_exit(&trx->undo_mutex);
 
+      // 这个roll_ptr 主要是要记录在主键的那个记录里面, 用于找到相应的undo log
+      // 从这里可以看到这个roll_ptr 主要包含了类型, space_id, page_num, offset
+      // 这样才可以让主键直接找到这个undo log
+      // roll_ptr = (roll_ptr_t)is_insert << 55 | (roll_ptr_t)id << 48 |
+      //   (roll_ptr_t)page_no << 16 | offset;
       *roll_ptr =
           trx_undo_build_roll_ptr(op_type == TRX_UNDO_INSERT_OP,
                                   undo_ptr->rseg->space_id, page_no, offset);
@@ -2254,6 +2269,7 @@ err_exit:
  @return own: copy of the record */
 static MY_ATTRIBUTE((warn_unused_result))
     trx_undo_rec_t *trx_undo_get_undo_rec_low(
+        // 这个roll_ptr 主要是要记录在主键的那个记录里面, 用于找到相应的undo log
         roll_ptr_t roll_ptr, /*!< in: roll pointer to record */
         mem_heap_t *heap,    /*!< in: memory heap where copied */
         bool is_temp)        /*!< in: true if temp undo rec. */
