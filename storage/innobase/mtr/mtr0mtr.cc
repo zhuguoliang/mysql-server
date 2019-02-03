@@ -663,8 +663,9 @@ void mtr_t::Command::execute() {
     ut_ad(write_log.m_left_to_write == 0);
     ut_ad(write_log.m_lsn == handle.end_lsn);
 
-    // 这里会想进去判断redo log 的recent_written buffer 里面有没有空间了
+    // 这里会想进去判断redo log 的recent closed buffer 里面有没有空间了
     // 如果没有空间, 就sleep 20ms
+    // 因为后续需要把这些内容添加到flush list 上
     log_wait_for_space_in_log_recent_closed(*log_sys, handle.start_lsn);
 
     DEBUG_SYNC_C("mtr_redo_before_add_dirty_blocks");
@@ -674,6 +675,8 @@ void mtr_t::Command::execute() {
     // 这里传进去的是这次mtr 修改过的lsn的开始和结束
     add_dirty_blocks_to_flush_list(handle.start_lsn, handle.end_lsn);
 
+    // 这里把recent closed 里面的link buffer 添加上这一段
+    // 后续log_closer 线程就会把recent_closed 这个buffer 往前推进
     log_buffer_close(*log_sys, handle);
 
     m_impl->m_mtr->m_commit_lsn = handle.end_lsn;

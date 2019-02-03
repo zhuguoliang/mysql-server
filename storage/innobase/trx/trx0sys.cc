@@ -336,6 +336,8 @@ purge_pq_t *trx_sys_init_at_db_start(void) {
 
   trx_dummy_sess = sess_open();
 
+  // 这里是主要流程, 从undo rollback segment 回复出当时的事务状态
+  // 包含正在进行的事务, 活跃事务数组, 最大事务ID 等等
   trx_lists_init_at_db_start();
 
   /* This mutex is not strictly required, it is here only to satisfy

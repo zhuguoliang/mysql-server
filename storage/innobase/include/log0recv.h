@@ -490,15 +490,23 @@ struct recv_sys_t {
   /** Buffer for parsing log records */
   byte *buf;
 
+  // buf_len 是recover buf 的总长度
+  // 下面的len 是当前在buf 里面数据的长度
   /** Size of the parsing buffer */
   size_t buf_len;
 
+  // buf 里面数据的长度
   /** Amount of data in buf */
   ulint len;
 
   /** This is the lsn from which we were able to start parsing
   log records and adding them to the hash table; zero if a suitable
   start point not found yet */
+  // 当数据存在 buf 里面以后, 我们就从buf 里面解析redo log 的数据
+  // 然后解析完redo log 的数据后, 将这些数据插入到hash table
+  // 插入到hash table 以后, 加入到buffer pool 的flush lish
+  // 最后再flush 下去.
+  // 这里这个lsn 就是从Buf 里面的哪个位置开始parse
   lsn_t parse_start_lsn;
 
   /** Checkpoint lsn that was used during recovery (read from file). */
@@ -508,16 +516,25 @@ struct recv_sys_t {
   ulint bytes_to_ignore_before_checkpoint;
 
   /** The log data has been scanned up to this lsn */
+  // 在扫描redo log 的时候, 已经扫描到的lsn 的位置
   lsn_t scanned_lsn;
 
   /** The log data has been scanned up to this checkpoint
   number (lowest 4 bytes) */
+  // 在扫描redo log 的时候, 已经扫描到的checkpoint 的位置
   ulint scanned_checkpoint_no;
 
+  // 这里是buf 里面还没有被解析到的地址
+  // 所以 buf + recovered_offset 才是需要解析的地址的开始
   /** Start offset of non-parsed log records in buf */
   ulint recovered_offset;
 
   /** The log records have been parsed up to this lsn */
+  // 在解析redo log 的时候, 已经解析到的lsn 的位置
+  // 在做recover 的时候, 分成三个阶段
+  // 1. 往 recv->buf 中拷贝数据
+  // 2. 将 recv->buf 中的数据进行解析并添加到hash table 中
+  // 3. 讲hash table 中的数据放到buffer pool flush List 中进行刷脏
   lsn_t recovered_lsn;
 
   /** Set when finding a corrupt log block or record, or there

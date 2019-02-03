@@ -729,6 +729,10 @@ encountered in crash recovery.  If the transaction already was
 committed, then we clean up a possible insert undo log. If the
 transaction was not yet committed, then we roll it back.
 Note: this is done in a background thread. */
+// 这个线程做的就是在crash recovery 阶段以及回复出undo 了, 然后又从undo 回复出
+// trx_sys 里面的事务了, 然后根据crash 的时候这些事务的状态,
+// 对以及提交的事务进行清理, 对未提交的事务进行清除redo
+// 操作
 void trx_recovery_rollback_thread() {
 #ifdef UNIV_PFS_THREAD
   THD *thd =

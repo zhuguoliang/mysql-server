@@ -369,6 +369,8 @@ void log_files_downgrade(log_t &log) {
 /* @{ */
 
 static lsn_t log_determine_checkpoint_lsn(log_t &log) {
+  // TODO(baotiao): dict_lsn 也表示的是到dict_lsn 位置, 所有的DDL 相关的操作
+  // 都已经写入到磁盘了. 因此他们两个的计算是分开的么?
   const lsn_t oldest_lsn = log.available_for_checkpoint_lsn;
   const lsn_t dict_lsn = log.dict_suggest_checkpoint_lsn;
 
@@ -853,6 +855,8 @@ static bool log_consider_checkpoint(log_t &log) {
 
   log_checkpointer_mutex_enter(log);
 
+  // TODO(baotiao): QA? 这里为什么需要检查两次Log_should_checkpoint(log)
+  // 为什么不第一次检查完就直接做了?
   /* We need to re-check if checkpoint should really be
   written, because we re-acquired the checkpointer_mutex.
   Some conditions could have changed - e.g. user could

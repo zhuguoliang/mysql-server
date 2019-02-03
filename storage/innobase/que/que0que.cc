@@ -977,6 +977,7 @@ static void que_run_threads_low(que_thr_t *thr) /*!< in: query thread */
     /* Perform the actual query step: note that the query thread
     may change if, e.g., a subprocedure call is made */
 
+    // 这里是把队列里面的元素拿出来并执行的地方
     /*-------------------------*/
     next_thr = que_thr_step(thr);
     /*-------------------------*/

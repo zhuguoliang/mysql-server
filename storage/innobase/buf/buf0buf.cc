@@ -369,6 +369,14 @@ lsn_t buf_pool_get_oldest_modification_approx(void) {
 
     buf_page_t *bpage;
 
+    // 这里直接去获得flush_list 上面的最后一个page, 如果这个page 不是临时表空间
+    // 并且非空, 那么就直接退出. 就获得这个lsn
+    // 然后对比获得到多个flush_list 上面最小(也就是oldest) lsn
+    //
+    // 这里我们可以看到并没有全部遍历flush_list, 而且只要找到第一个非NULL
+    // 并且不是临时表空间的就直接退出了.
+    // 而且flush_list 里面是越old 的元素放在越后面, 因此有可能每一个buffer pool
+    // 只需要获得第一个元素就可以了
     /* We don't let log-checkpoint halt because pages from system
     temporary are not yet flushed to the disk. Anyway, object
     residing in system temporary doesn't generate REDO logging. */
@@ -407,6 +415,7 @@ lsn_t buf_pool_get_oldest_modification_lwm(void) {
 
   const log_t &log = *log_sys;
 
+  // 指的是recent_closed buffer 大小
   const lsn_t lag = log_buffer_flush_order_lag(log);
 
   ut_a(lag % OS_FILE_LOG_BLOCK_SIZE == 0);

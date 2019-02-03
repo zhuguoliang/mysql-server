@@ -281,6 +281,8 @@ that reference undo tablespaces and have active undo logs, then quit.
 They require an upgrade of undo tablespaces and that cannot happen with
 active undo logs.
 @param[in]	purge_queue	queue of rsegs to purge */
+// 这里是初始化rollback segment 的过程
+// 在srv_start 阶段就需要做这个事情
 void trx_rsegs_init(purge_pq_t *purge_queue) {
   trx_sys->rseg_history_len = 0;
 
@@ -294,6 +296,8 @@ void trx_rsegs_init(purge_pq_t *purge_queue) {
     mtr.start();
     trx_sysf_t *sys_header = trx_sysf_get(&mtr);
 
+    // 根据sys_header, 以及这个rollback segment slot, 也就是第几个rollback
+    // segment 去找到对应的rollback segment page
     page_no = trx_sysf_rseg_get_page_no(sys_header, slot, &mtr);
 
     if (page_no != FIL_NULL) {
@@ -302,6 +306,7 @@ void trx_rsegs_init(purge_pq_t *purge_queue) {
       /* Create the trx_rseg_t object.
       Note that all tablespaces with rollback segments
       use univ_page_size. (system, temp & undo) */
+      // 建立rollback segment 在内存中的结构
       rseg = trx_rseg_mem_create(slot, space_id, page_no, univ_page_size,
                                  purge_queue, &mtr);
 

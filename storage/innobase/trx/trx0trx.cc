@@ -945,6 +945,13 @@ void trx_lists_init_at_db_start(void) {
 
   /* Look through the rollback segments in the TRX_SYS for
   transaction undo logs. */
+  // TODO(baotiao): 这里两个地方不同的rsegs 有什么区别吗?
+  // 一个是 TRX_SYS里面的 rsegs, 一个是undo_space 里面的rsegs
+  //
+  // 这里应该是因为Undo log 可以存放在系统表空间里面, 也可以自己定义文件存储,
+  // 比如undo_log01, undo_log02 等等
+  // 所以两个space 都需要遍历一下
+  // 通过trx_resurrect 恢复出当时的事务
   for (auto rseg : trx_sys->rsegs) {
     trx_resurrect(rseg);
   }
@@ -963,6 +970,8 @@ void trx_lists_init_at_db_start(void) {
 
   TrxIdSet::iterator end = trx_sys->rw_trx_set.end();
 
+  // 这里也同时更新最大事务id, 因为在trx_resurrect() 里面, 会把rw_trx_set
+  // 给更新了
   for (TrxIdSet::iterator it = trx_sys->rw_trx_set.begin(); it != end; ++it) {
     ut_ad(it->m_trx->in_rw_trx_list);
 #ifdef UNIV_DEBUG
@@ -971,6 +980,9 @@ void trx_lists_init_at_db_start(void) {
     }
 #endif /* UNIV_DEBUG */
 
+    // 这里也同时更新活跃事务数组, 如果这个事务是状态是ACTIVE 或者 PREPARED
+    // 就把这个事务加到活跃事务数组中去
+    //
     if (it->m_trx->state == TRX_STATE_ACTIVE ||
         it->m_trx->state == TRX_STATE_PREPARED) {
       trx_sys->rw_trx_ids.push_back(it->m_id);
