@@ -3349,10 +3349,10 @@ bool meb_scan_log_recs(
 
 #ifndef UNIV_HOTBACKUP
     if (recv_heap_used() > max_memory) {
-      // 在执行这个函数的时候说明遇到了corrupt, 需要将undo 中的日志回放到btree
-      // 中, 这里可以看到对redo 的处理, 只是把checkpoint 之后的redolog
-      // 加到buffer pool 里面, 然后让线程将buffer pool 中的内容刷到btree.
-      // 只有Undo log 中的内容才会调用recv_apply 将其直接apply 到btree data中
+      // 执行到这里说明recv_sys_t 使用的内存超过了限制了, 因此要把recv_sys 模块
+      // 中的一些内容提前刷到磁盘中, 因此提前调用recv_apply_hashed_log_recs()
+      // 把相应的内容提前写入, 正常调用recv_apply_hashed_log_recs() 是把所有redo
+      // log 都扫描, parse 然后才会执行.
       recv_apply_hashed_log_recs(log, false);
     }
 #endif /* !UNIV_HOTBACKUP */

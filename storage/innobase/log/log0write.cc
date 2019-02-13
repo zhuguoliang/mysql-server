@@ -1090,13 +1090,14 @@ struct Log_write_to_file_requests_monitor {
 #define log_writer_mutex_own(log) true
 #endif /* !UNIV_HOTBACKUP */
 
-// 根据offset 算出在这个redolog 文件中的偏移量
+// 从real_offset 算出 size_offset
 uint64_t log_files_size_offset(const log_t &log, uint64_t offset) {
   ut_ad(log_writer_mutex_own(log));
 
   return (offset - LOG_FILE_HDR_SIZE * (1 + offset / log.file_size));
 }
 
+// 从size_offset 算出 real_offset
 uint64_t log_files_real_offset(const log_t &log, uint64_t offset) {
   ut_ad(log_writer_mutex_own(log));
 
@@ -1104,8 +1105,16 @@ uint64_t log_files_real_offset(const log_t &log, uint64_t offset) {
                        (1 + offset / (log.file_size - LOG_FILE_HDR_SIZE)));
 }
 
-// 给定一个lsn, 算出这个lsn 具体在文件的位置. 这个lsn 有可能超过了
+// 给定一个lsn, 算出这个lsn 的real_offset. 这个lsn 有可能超过了
 // redolog 个数 * redolog 大小的位置
+//
+// 这里注意有两个offset
+// size_offset 是不包含LOG_FILE_HDR_SIZE 的offset
+// real_offset 是包含LOG_FILE_HDR_SIZE 的offset, 也就是包含了文件头的2k,
+// 具体需要读取数据的时候都需要从这个real_offset 去读取
+// 所以这里有两个转换函数
+// log_files_size_offset 从real_offset 转换成 size_offset
+// log_files_real_offset 从size_offset 转换成 real_offset
 uint64_t log_files_real_offset_for_lsn(const log_t &log, lsn_t lsn) {
   uint64_t size_offset;
   uint64_t size_capacity;
@@ -1136,6 +1145,7 @@ uint64_t log_files_real_offset_for_lsn(const log_t &log, lsn_t lsn) {
   // 所以需要% 他们的乘积用来确定最终的位置
   size_offset = (size_offset + delta) % size_capacity;
 
+  // 根据size_offset 去算出real_offset
   return (log_files_real_offset(log, size_offset));
 }
 #ifndef UNIV_HOTBACKUP
