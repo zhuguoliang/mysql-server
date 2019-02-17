@@ -311,6 +311,8 @@ purge_pq_t *trx_sys_init_at_db_start(void) {
     /* Create the memory objects for all the rollback segments
     referred to in the TRX_SYS page or any undo tablespace
     RSEG_ARRAY page. */
+    // 依次通过trx_rseg_mem_create 创建rollback segment trx_rseg_t,
+    // 然后创建trx_rseg_t 中的undo pages
     trx_rsegs_init(purge_queue);
   }
 
