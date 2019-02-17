@@ -376,12 +376,16 @@ struct log_t {
   including headers of the log files. */
   uint64_t files_real_capacity;
 
+  
   /** Capacity of redo log files for log writer thread. The log writer
   does not to exceed this value. If space is not reclaimed after 1 sec
   wait, it writes only as much as can fit the free space or crashes if
   there is no free space at all (checkpoint did not advance for 1 sec). */
   lsn_t lsn_capacity_for_writer;
 
+  // TODO check next four variables used in some other function.
+  // and disable the functions
+  //
   /** When this margin is being used, the log writer decides to increase
   the concurrency_margin to stop new incoming mini transactions earlier,
   on bigger margin. This is used to provide adaptive concurrency margin

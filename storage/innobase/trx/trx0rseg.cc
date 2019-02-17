@@ -292,6 +292,7 @@ void trx_rsegs_init(purge_pq_t *purge_queue) {
   page_no_t page_no;
   trx_rseg_t *rseg = nullptr;
 
+  // TODO(baotiao): 这里为什么分成两次 trx_rseg_mem_create
   for (slot = 0; slot < TRX_SYS_N_RSEGS; slot++) {
     mtr.start();
     trx_sysf_t *sys_header = trx_sysf_get(&mtr);
@@ -319,6 +320,12 @@ void trx_rsegs_init(purge_pq_t *purge_queue) {
   }
 
   undo::spaces->s_lock();
+  // 这里为什么undo::spaces->m_spaces 有多个?
+  // 因为默认的场景下面, rollback segment 是有128个
+  // 然后rollback segment 0是保存在sys tablespace, 也就是tablespace_id = 0
+  // 1~32 这32 个rollback segment 是保存在临时表的表空间
+  // 而33~128 这96 个rollback segment 是保存在自己独立的表空间, 所谓独立的表空间
+  // 就是自己有一个自己对应的undolog 文件, 然后有自己的 tablespace_id 
   for (auto undo_space : undo::spaces->m_spaces) {
     /* Remember the size of the purge queue before processing this
     undo tablespace. */

@@ -974,6 +974,9 @@ void trx_lists_init_at_db_start(void) {
     trx_resurrect(rseg);
   }
 
+  // 为什么这里需要分开看
+  // 分别看trx_sys 里面的rsegs 和 undo::spaces->m_spaces 里面的rsegs 呢?
+  //
   /* Look through the rollback segments in each RSEG_ARRAY for
   transaction undo logs. */
   undo::spaces->s_lock();
