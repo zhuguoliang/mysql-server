@@ -534,7 +534,7 @@ struct recv_sys_t {
   // 在做recover 的时候, 分成三个阶段
   // 1. 往 recv->buf 中拷贝数据
   // 2. 将 recv->buf 中的数据进行解析并添加到hash table 中
-  // 3. 讲hash table 中的数据放到buffer pool flush List 中进行刷脏
+  // 3. 将hash table 中的数据放到buffer pool flush List 中进行刷脏
   lsn_t recovered_lsn;
 
   /** Set when finding a corrupt log block or record, or there

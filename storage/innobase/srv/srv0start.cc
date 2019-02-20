@@ -2876,6 +2876,7 @@ void srv_start_threads(bool bootstrap) {
     return;
   }
 
+  // 将recv 奔溃恢复结束以后, 判断需要回滚或者正在XA 状态的事务进行回滚
   if (!bootstrap && srv_force_recovery < SRV_FORCE_NO_TRX_UNDO &&
       trx_sys_need_rollback()) {
     /* Rollback all recovered transactions that are
