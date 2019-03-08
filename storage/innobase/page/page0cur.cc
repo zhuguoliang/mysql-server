@@ -361,6 +361,7 @@ static ulint *populate_offsets(const rec_t *rec, const dtuple_t *tuple,
 
 #ifndef UNIV_HOTBACKUP
 /** Searches the right position for a page cursor. */
+// 在一个page 内部搜索用户记录tuple 的具体位置
 void page_cur_search_with_match(
     const buf_block_t *block,  /*!< in: buffer block */
     const dict_index_t *index, /*!< in/out: record descriptor */
@@ -472,6 +473,8 @@ void page_cur_search_with_match(
   /* Perform binary search until the lower and upper limit directory
   slots come to the distance 1 of each other */
 
+  // 在page dir 中进行二分遍历, page dir 中包含在当前这个page 中所有的record
+  // 的索引, 因此可以通过page dir 快速定位到某一条Record
   while (up - low > 1) {
     mid = (low + up) / 2;
     slot = page_dir_get_nth_slot(page, mid);
@@ -488,6 +491,8 @@ void page_cur_search_with_match(
                                 dtuple_get_n_fields_cmp(tuple), &heap);
     }
 
+    // 将这个dtuple 和 rec_t 进行比较
+    // 在cmp_dtuple_rec_with_match 中, 会对dtuple_t 中的field 一个一个的比较
     cmp = cmp_dtuple_rec_with_match(tuple, mid_rec, index, offsets,
                                     &cur_matched_fields);
 
@@ -519,6 +524,8 @@ void page_cur_search_with_match(
     }
   }
 
+  // 上面通过二分查找以后, 从page dir 中可以获得在一个范围里面
+  // 那么接下来就只能一个一个的对比查找了
   slot = page_dir_get_nth_slot(page, low);
   low_rec = page_dir_slot_get_rec(slot);
   slot = page_dir_get_nth_slot(page, up);
@@ -588,6 +595,7 @@ void page_cur_search_with_match(
   }
 
   if (mode <= PAGE_CUR_GE) {
+    // 将cursor 的位置设定到某一个record 上
     page_cur_position(up_rec, block, cursor);
   } else {
     page_cur_position(low_rec, block, cursor);
@@ -1199,6 +1207,7 @@ byte *page_cur_parse_insert_rec(
  Returns pointer to inserted record if succeed, i.e., enough
  space available, NULL otherwise. The cursor stays at the same position.
  @return pointer to record if succeed, NULL otherwise */
+// 这个是将record insert 的入口
 rec_t *page_cur_insert_rec_low(
     rec_t *current_rec,  /*!< in: pointer to current record after
                      which the new record is inserted */
@@ -1309,10 +1318,13 @@ rec_t *page_cur_insert_rec_low(
       ut_ad(rec_get_status(next_rec) != REC_STATUS_INFIMUM);
     }
 #endif
+    // 在Page 上更新record 之间的链表关系
+    // 指向下一个record
     page_rec_set_next(insert_rec, next_rec);
     page_rec_set_next(current_rec, insert_rec);
   }
 
+  // 更新当前page 有的record 数
   page_header_set_field(page, NULL, PAGE_N_RECS, 1 + page_get_n_recs(page));
 
   /* 5. Set the n_owned field in the inserted record to zero,

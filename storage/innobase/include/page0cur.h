@@ -314,6 +314,7 @@ bool page_delete_rec(
 
 struct page_cur_t {
   const dict_index_t *index{nullptr};
+  // 指向一个page 里面具体的record 的位置
   rec_t *rec{nullptr}; /*!< pointer to a record on page */
   ulint *offsets{nullptr};
   buf_block_t *block{nullptr}; /*!< pointer to the block containing rec */

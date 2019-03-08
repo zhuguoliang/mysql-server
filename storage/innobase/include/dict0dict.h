@@ -1090,6 +1090,9 @@ struct dict_persist_t;
 extern dict_persist_t *dict_persist;
 
 /* Dictionary system struct */
+// 所有的表信息都会在dict_sys_t 结构体上
+// dict_sys_t => dict_table_t => dict_index_t
+//
 struct dict_sys_t {
 #ifndef UNIV_HOTBACKUP
   DictSysMutex mutex;          /*!< mutex protecting the data

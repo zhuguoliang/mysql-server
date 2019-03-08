@@ -398,6 +398,7 @@ static int cmp_whole_field(ulint mtype, ulint prtype, bool is_asc,
 @retval 0 if data1 is equal to data2
 @retval negative if data1 is less than data2
 @retval positive if data1 is greater than data2 */
+// 具体对一个field 进行比较
 inline int cmp_data(ulint mtype, ulint prtype, bool is_asc, const byte *data1,
                     ulint len1, const byte *data2, ulint len2) {
   if (len1 == UNIV_SQL_NULL || len2 == UNIV_SQL_NULL) {
@@ -638,6 +639,7 @@ int cmp_data_data(ulint mtype, ulint prtype, bool is_asc, const byte *data1,
 @retval 0 if dtuple is equal to rec
 @retval negative if dtuple is less than rec
 @retval positive if dtuple is greater than rec */
+// 将用户传进来的dtuple_t 和page 中的rec_t 进行比较
 int cmp_dtuple_rec_with_match_low(const dtuple_t *dtuple, const rec_t *rec,
                                   const dict_index_t *index,
                                   const ulint *offsets, ulint n_cmp,
@@ -673,6 +675,8 @@ int cmp_dtuple_rec_with_match_low(const dtuple_t *dtuple, const rec_t *rec,
 
   /* Match fields in a loop */
 
+  // 把dtuple 里面的field 一个一个拿出来, 然后到rec_t 里面找到对应的field
+  // 进行比较
   for (; cur_field < n_cmp; cur_field++) {
     const byte *rec_b_ptr;
     const dfield_t *dtuple_field = dtuple_get_nth_field(dtuple, cur_field);
@@ -696,6 +700,7 @@ int cmp_dtuple_rec_with_match_low(const dtuple_t *dtuple, const rec_t *rec,
 
     /* For now, change buffering is only supported on
     indexes with ascending order on the columns. */
+    // 从dtuple 和 rec_t 分别取出n_field, 然后对进行比较
     ret = cmp_data(
         type->mtype, type->prtype,
         dict_index_is_ibuf(index) || index->get_field(cur_field)->is_ascending,

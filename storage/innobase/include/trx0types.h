@@ -100,6 +100,7 @@ enum trx_state_t {
   /** Support for 2PC/XA */
   TRX_STATE_PREPARED,
 
+  // TODO(baotiao): 是从 STATE_ACTIVE => IN_MEMORY, IN_MEMORY 之后又是什么
   TRX_STATE_COMMITTED_IN_MEMORY
 };
 

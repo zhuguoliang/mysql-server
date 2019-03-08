@@ -54,6 +54,12 @@ external tools. */
  is set (REC_OFFS_SQL_NULL), the field i is NULL.  When the second
  high-order bit of the offset at [i+1] is set (REC_OFFS_EXTERNAL), the
  field i is being stored externally. */
+// 这里会把一个dict_index_t 里面每一个field 的offset 都写在offsets 这个数组里面
+// 其中rec_offs_n_fields(offsets) 设定的是这个record 的field 个数,
+// 最后会设定在rec_offs_base(offsets)[0] 里面 
+// 后续想要知道某一个fields 的offset 的时候, 就可以直接通过rec_offs_base(offsets)[1..n_fields] 
+// 就可以了
+// 所以后续想获取一个record 里面的某一个offset 的时候, 直接使用offsets 就行
 void rec_init_offsets(const rec_t *rec,          /*!< in: physical record */
                       const dict_index_t *index, /*!< in: record descriptor */
                       ulint *offsets)            /*!< in/out: array of offsets;

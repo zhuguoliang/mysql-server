@@ -601,6 +601,8 @@ static bool btr_cur_need_opposite_intention(const page_t *page,
  search tuple should be performed in the B-tree. InnoDB does an insert
  immediately after the cursor. Thus, the cursor may end up on a user record,
  or on a page infimum record. */
+// 这里search 的时候可以指定level, 如果level == 0 说明就是search 到leaf node
+// 否则就不是到leaf node
 void btr_cur_search_to_nth_level(
     dict_index_t *index,   /*!< in: index */
     ulint level,           /*!< in: the tree level of search */
@@ -878,6 +880,7 @@ void btr_cur_search_to_nth_level(
         upper_rw_latch = RW_NO_LATCH;
       }
   }
+  // 确定根节点的latch 类型
   root_leaf_rw_latch = btr_cur_latch_for_root_leaf(latch_mode);
 
   page_cursor = btr_cur_get_page_cur(cursor);
@@ -925,11 +928,16 @@ void btr_cur_search_to_nth_level(
   /* Loop and search until we arrive at the desired level */
   btr_latch_leaves_t latch_leaves = {{NULL, NULL, NULL}, {0, 0, 0}};
 
+// 这里是循环遍历btree 的地方, 如果没有search 到指定level, 那么会又jump 回到这里
+// 在这个search_loop 里面, 在page 级别进行查找的函数是
+// page_cur_search_with_match
+// 因为无论怎么search, 最后还是要进入到一个page, 把一个page 里面的数据读取出来
 search_loop:
   fetch = cursor->m_fetch_mode;
   rw_latch = RW_NO_LATCH;
   rtree_parent_modified = false;
 
+  // 一级一级往下找, 
   if (height != 0) {
     /* We are about to fetch the root or a non-leaf page. */
     if ((latch_mode != BTR_MODIFY_TREE || height == level) &&
@@ -961,10 +969,13 @@ search_loop:
 retry_page_get:
   ut_ad(n_blocks < BTR_MAX_LEVELS);
   tree_savepoints[n_blocks] = mtr_set_savepoint(mtr);
+  // 第一次进来的时候, 根据root 节点的page_id, 获得对应的Page
   block = buf_page_get_gen(page_id, page_size, rw_latch, guess, fetch, file,
                            line, mtr);
   tree_blocks[n_blocks] = block;
 
+  // 如果没有找到这个page, 说明这个search 操作是为insert/delete 服务的, 因此
+  // 触发 search 
   if (block == NULL) {
     /* This must be a search to perform an insert/delete
     mark/ delete; try using the insert/delete buffer */
@@ -1041,6 +1052,7 @@ retry_page_get:
     rw_latch = upper_rw_latch;
 
     rw_lock_s_lock(&block->lock);
+    // 尝试去获得当前这个block 左边的节点
     left_page_no = btr_page_get_prev(buf_block_get_frame(block), mtr);
     rw_lock_s_unlock(&block->lock);
 
@@ -1138,6 +1150,7 @@ retry_page_get:
 #endif
   }
 
+  // height == 0 说明已经找到Leaf 节点了
   if (height == 0) {
     if (rw_latch == RW_NO_LATCH) {
       latch_leaves = btr_cur_latch_leaves(block, page_id, page_size, latch_mode,
@@ -1300,6 +1313,9 @@ retry_page_get:
     }
   }
 
+  // 这里就是循环的地方, 如果往下走的时候, level != height
+  // 那么height-- 就代表btree 往下走一层
+  // 在这个if 的结尾 又回到search_loop 继续遍历这个btree
   if (level != height) {
     const rec_t *node_ptr;
     ut_ad(height > 0);
@@ -1307,8 +1323,11 @@ retry_page_get:
     height--;
     guess = NULL;
 
+    // page_cursor 保存的是page_cur_search_with_match 函数search 返回出来的结果
     node_ptr = page_cur_get_rec(page_cursor);
 
+    // 获得这个offsets 数组, 后续想知道这个record 里面某一个field 位置,
+    // 直接访问offsets 就可以了
     offsets = rec_get_offsets(node_ptr, index, offsets, ULINT_UNDEFINED, &heap);
 
     /* If the rec is the first or last in the page for
@@ -1408,6 +1427,7 @@ retry_page_get:
         !dict_index_is_unique(index) && latch_mode == BTR_MODIFY_TREE &&
         (up_match >= rec_offs_n_fields(offsets) - 1 ||
          low_match >= rec_offs_n_fields(offsets) - 1)) {
+      // 获得第一个record 的时候是先获得最小的infimum rec, 然后获得next record
       const rec_t *first_rec =
           page_rec_get_next_const(page_get_infimum_rec(page));
       ulint matched_fields;
@@ -1444,6 +1464,9 @@ retry_page_get:
       }
     }
 
+    // 当前的修改page 操作, 如果需要改变btree 结构, 那么父节点的lock
+    // 是不能放开的
+    // 主要通过btr_cur_will_modify_tree 确定是否会修改树结构
     /* If the page might cause modify_tree,
     we should not release the parent page's lock. */
     if (!detected_same_key_root && latch_mode == BTR_MODIFY_TREE &&
@@ -1614,6 +1637,8 @@ retry_page_get:
     goto need_opposite_intention;
   }
 
+  // 到了这里说明已经search 到指定level 了, 然后如果用户指定的search level == 0
+  // 说明是想要search leaf node, 那么就需要特殊处理一下
   if (level != 0) {
     if (upper_rw_latch == RW_NO_LATCH) {
       /* latch the page */
@@ -1652,6 +1677,7 @@ retry_page_get:
       cursor->up_match = up_match;
     }
   } else {
+    // search 以后的结果是保存在cursor 里面, 所以更新一下cursor 就行
     cursor->low_match = low_match;
     cursor->low_bytes = low_bytes;
     cursor->up_match = up_match;
@@ -2832,6 +2858,7 @@ dberr_t btr_cur_optimistic_insert(
     } else {
       /* Check locks and write to the undo log,
       if specified */
+      // 在写入page 之前要先检查lock, 然后将历史数据先写到undo
       err = btr_cur_ins_lock_and_undo(flags, cursor, entry, thr, mtr, &inherit);
 
       if (err != DB_SUCCESS) {

@@ -183,7 +183,6 @@ static lsn_t log_get_available_for_checkpoint_lsn(const log_t &log) {
     because it might be scheduled out. Yes, the returned lwm
     guarantees it is able to advance, but it needs to do it! */
 
-    ut_a(lwm_lsn <= dpa_lsn);
     lwm_lsn = std::min(lwm_lsn, dpa_lsn);
   }
 

@@ -692,6 +692,8 @@ enum btr_cur_method {
 /** The tree cursor: the definition appears here only for the compiler
 to know struct size! */
 struct btr_cur_t {
+  // 最后保存下来的索引信息的位置
+  // 里面会保存具体的table id, space id 等等
   dict_index_t *index{nullptr};      /*!< index where positioned */
   page_cur_t page_cur;               /*!< page cursor */
   purge_node_t *purge_node{nullptr}; /*!< purge node, for BTR_DELETE */

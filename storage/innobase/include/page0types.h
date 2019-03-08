@@ -169,6 +169,7 @@ ssize, which is the number of shifts from 512. */
 #endif
 
 /* Page cursor search modes; the values must be in this order! */
+// 表示的是 >, 还是>=, 还是<, 还是<= 这种
 enum page_cur_mode_t {
   PAGE_CUR_UNSUPP = 0,
   PAGE_CUR_G = 1,

@@ -456,6 +456,8 @@ inline std::ostream &operator<<(std::ostream &out, const dfield_t &obj) {
 }
 
 /** Structure for an SQL data tuple of fields (logical record) */
+// 用来描述用户传进来的条件, 比如在一个查询里面 id = 4 && name == "baotiao"
+// 那么这里这个dtuple_t 就是描述这两个条件
 struct dtuple_t {
   ulint info_bits;    /*!< info bits of an index record:
                       the default is 0; this field is used

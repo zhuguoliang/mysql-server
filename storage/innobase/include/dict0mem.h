@@ -863,6 +863,8 @@ class Spatial_reference_system;
 
 /** Data structure for an index.  Most fields will be
 initialized to 0, NULL or FALSE in dict_mem_index_create(). */
+// dict_sys_t => dict_table_t => dict_index_t
+// 一个table 里面的一个索引的描述
 struct dict_index_t {
   space_index_t id;       /*!< id of the index */
   mem_heap_t *heap;       /*!< memory heap */
@@ -1485,6 +1487,10 @@ typedef std::vector<row_prebuilt_t *> temp_prebuilt_vec;
 
 /** Data structure for a database table.  Most fields will be
 initialized to 0, NULL or FALSE in dict_mem_table_create(). */
+
+// dict_sys_t => dict_table_t => dict_index_t
+//
+// 对于一个table 的描述
 struct dict_table_t {
   /** Check if the table is compressed.
   @return true if compressed, false otherwise. */
@@ -1506,6 +1512,8 @@ struct dict_table_t {
   inline void release();
 
   /** Lock the table handle. */
+  // 这个就是我们常说了当我们需要修改整个btree 结构的时候, 
+  // 需要把整个db 锁住的锁
   inline void lock();
 
   /** Unlock the table handle. */
