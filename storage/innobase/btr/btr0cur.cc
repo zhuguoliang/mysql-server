@@ -2647,6 +2647,7 @@ UNIV_INLINE MY_ATTRIBUTE((warn_unused_result)) dberr_t
     return (err);
   }
 
+  // 将当前这条记录写入到undo log
   err = trx_undo_report_row_operation(flags, TRX_UNDO_INSERT_OP, thr, index,
                                       entry, NULL, 0, NULL, NULL, &roll_ptr);
   if (err != DB_SUCCESS) {
@@ -2853,6 +2854,7 @@ dberr_t btr_cur_optimistic_insert(
     if (index->table->is_intrinsic()) {
       index->rec_cache.rec_size = rec_size;
 
+      // 如果是系统创建的table, 直接执行insert 操作
       *rec =
           page_cur_tuple_direct_insert(page_cursor, entry, index, n_ext, mtr);
     } else {
@@ -2881,6 +2883,8 @@ dberr_t btr_cur_optimistic_insert(
                                            "WAIT_FOR btr_ins_resume "
                                            "NO_CLEAR_EVENT"))););
 
+      // 主要的往btree page 插入流程
+      // 如果第一次写入失败, 会尝试第二次写入
       *rec = page_cur_tuple_insert(page_cursor, entry, index, offsets, heap,
                                    n_ext, mtr);
     }
@@ -2918,6 +2922,8 @@ dberr_t btr_cur_optimistic_insert(
 
     reorg = TRUE;
 
+    // 在第一次写入page, 但是page 满了造成写入失败以后, 进行了reorganize 以后
+    // 重新再次进行一次写入
     *rec = page_cur_tuple_insert(page_cursor, entry, index, offsets, heap,
                                  n_ext, mtr);
 
@@ -3010,12 +3016,17 @@ dberr_t btr_cur_pessimistic_insert(
 
   *big_rec = NULL;
 
+  // 确保这个时候已经对整个btree 加了x 或者xs lock
+  // 或者这个btree 是系统自己的btree
+  // 经常会看到is_intrinsic() 这个判断
   ut_ad(mtr_memo_contains_flagged(
             mtr, dict_index_get_lock(btr_cur_get_index(cursor)),
             MTR_MEMO_X_LOCK | MTR_MEMO_SX_LOCK) ||
         cursor->index->table->is_intrinsic());
+  // 确保当前这个PAGE 已经加了X lock
   ut_ad(mtr_is_block_fix(mtr, btr_cur_get_block(cursor), MTR_MEMO_PAGE_X_FIX,
                          cursor->index->table));
+  // 确保没有online_ddl, 确保是cluster index
   ut_ad(!dict_index_is_online_ddl(index) || index->is_clustered() ||
         (flags & BTR_CREATE_FLAG));
 
@@ -3073,6 +3084,8 @@ dberr_t btr_cur_pessimistic_insert(
     *rec = btr_root_raise_and_insert(flags, cursor, offsets, heap, entry, n_ext,
                                      mtr);
   } else {
+    // 走到pessimistic 说明insert 必然要修改btree 结构了, 因此进行split and
+    // insert 操作
     *rec = btr_page_split_and_insert(flags, cursor, offsets, heap, entry, n_ext,
                                      mtr);
   }

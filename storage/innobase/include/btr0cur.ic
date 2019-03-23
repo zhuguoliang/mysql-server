@@ -84,6 +84,7 @@ page_zip_des_t *btr_cur_get_page_zip(btr_cur_t *cursor) /*!< in: tree cursor */
 UNIV_INLINE
 page_t *btr_cur_get_page(btr_cur_t *cursor) /*!< in: tree cursor */
 {
+  // 获得这个page 上的record, 经过page_align 以后, 就指向了对应的page 了
   return (page_align(page_cur_get_rec(&(cursor->page_cur))));
 }
 

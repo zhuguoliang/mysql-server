@@ -2122,6 +2122,9 @@ dberr_t srv_start(bool create_new_db, const std::string &scan_directories) {
   /* Open or create the data files. */
   page_no_t sum_of_new_sizes;
 
+  // 在这里会对recv_sys 的double write buffer 进行初始化
+  // 这里会把system table space 的ibd 文件打开, 并进行初始化工作
+  // srv_sys_space 是space id 0 的核心space
   err = srv_sys_space.open_or_create(false, create_new_db, &sum_of_new_sizes,
                                      &flushed_lsn);
 

@@ -106,6 +106,7 @@ void trx_sys_flush_max_trx_id(void) {
 
     sys_header = trx_sysf_get(&mtr);
 
+    // 在file space 里面的第5个Page TRX_SYS_PAGE_NO, 上面会去更新当前max_trx_id
     mlog_write_ull(sys_header + TRX_SYS_TRX_ID_STORE, trx_sys->max_trx_id,
                    &mtr);
 

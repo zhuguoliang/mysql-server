@@ -1773,6 +1773,7 @@ static rec_t *btr_page_get_split_rec(
   mem_heap_t *heap;
   ulint *offsets;
 
+  // 从btree cursor 到 page cursor 再到这个page
   page = btr_cur_get_page(cursor);
 
   insert_size = rec_get_converted_size(cursor->index, tuple, n_ext);
@@ -2223,6 +2224,7 @@ static rec_t *btr_insert_into_right_sibling(ulint flags, btr_cur_t *cursor,
 
   bool is_leaf = page_is_leaf(next_page);
 
+  // 获得一个cursor 的父节点, 需要重新search 这个btree 才可以获得
   btr_page_get_father(cursor->index, next_block, mtr, &next_father_cursor);
 
   page_cur_search(next_block, cursor->index, tuple, PAGE_CUR_LE,

@@ -691,6 +691,8 @@ enum btr_cur_method {
 
 /** The tree cursor: the definition appears here only for the compiler
 to know struct size! */
+// btr_cur_t => page_cur_t => block
+// 具体指向btree 的point
 struct btr_cur_t {
   // 最后保存下来的索引信息的位置
   // 里面会保存具体的table id, space id 等等

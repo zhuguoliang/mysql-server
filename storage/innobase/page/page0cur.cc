@@ -948,6 +948,10 @@ static void page_cur_insert_rec_write_log(
 
   if (mtr_get_log_mode(mtr) != MTR_LOG_SHORT_INSERTS) {
     if (page_rec_is_comp(insert_rec)) {
+      // 写入一条类型为MLOG_COMP_REC_INSERT 的mtr 类型
+      // mtr 会写入到redo
+      // recovery 的时候拿到这个类型的redo 就可以回放
+      // 所以MLOG_COMP_REC_INSERT 应该是最常见的mtr 类型了
       log_ptr = mlog_open_and_write_index(mtr, insert_rec, index,
                                           MLOG_COMP_REC_INSERT,
                                           2 + 5 + 1 + 5 + 5 + MLOG_BUF_MARGIN);
@@ -1318,8 +1322,8 @@ rec_t *page_cur_insert_rec_low(
       ut_ad(rec_get_status(next_rec) != REC_STATUS_INFIMUM);
     }
 #endif
-    // 在Page 上更新record 之间的链表关系
-    // 指向下一个record
+    // 在Index Page 上更新next_rec, 也就是在Index Header 上更新
+    // REC_NEXT 字段
     page_rec_set_next(insert_rec, next_rec);
     page_rec_set_next(current_rec, insert_rec);
   }
@@ -1329,6 +1333,7 @@ rec_t *page_cur_insert_rec_low(
 
   /* 5. Set the n_owned field in the inserted record to zero,
   and set the heap_no field */
+  // 更新Number of Records Owned 字段
   if (page_is_comp(page)) {
     rec_set_n_owned_new(insert_rec, NULL, 0);
     rec_set_heap_no_new(insert_rec, heap_no);
@@ -1341,6 +1346,7 @@ rec_t *page_cur_insert_rec_low(
                      rec_offs_size(offsets));
   /* 6. Update the last insertion info in page header */
 
+  // 更新Index Page Header 里面PAGE_LAST_INSERT 字段
   last_insert = page_header_get_ptr(page, PAGE_LAST_INSERT);
   ut_ad(!last_insert || !page_is_comp(page) ||
         rec_get_node_ptr_flag(last_insert) ==
@@ -1368,6 +1374,7 @@ rec_t *page_cur_insert_rec_low(
     }
   }
 
+  // 更新Index page Header 里面的page_last_insert 字段
   page_header_set_ptr(page, NULL, PAGE_LAST_INSERT, insert_rec);
 
   /* 7. It remains to update the owner record. */
@@ -1386,6 +1393,8 @@ rec_t *page_cur_insert_rec_low(
     record. If the number exceeds PAGE_DIR_SLOT_MAX_N_OWNED,
     we have to split the corresponding directory slot in two. */
 
+    // 这里更新index page 里面的directory slot 信息, directory slot 是
+    // 当前这个page 里面的record 的索引
     if (UNIV_UNLIKELY(n_owned == PAGE_DIR_SLOT_MAX_N_OWNED)) {
       page_dir_split_slot(page, NULL, page_dir_find_owner_slot(owner_rec));
     }

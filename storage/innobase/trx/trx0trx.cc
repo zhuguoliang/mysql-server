@@ -3006,6 +3006,7 @@ void trx_set_rw_mode(trx_t *trx) /*!< in/out: transaction that is RW */
   that both threads are synced by acquring trx->mutex to avoid decision
   based on in-consistent view formed during promotion. */
 
+  // 给这个trx 分配一个唯一的rollback segment
   trx_assign_rseg_durable(trx);
 
   ut_ad(trx->rsegs.m_redo.rseg != 0);

@@ -78,6 +78,11 @@ trx_sysf_t *trx_sysf_get(mtr_t *mtr) /*!< in: mtr */
 
   // TODO(Q&A): 为什么去获得一个page 的时候也需要mtr
   // 明明是读取一个page
+  // 一般buf_page_get_gen 函数是在一个mtr过程中执行从Btree 中读取数据到Buffer
+  // pool, 然后读取的过程需要对这个page 进行加锁, 所以在buf_page_get_gen 中,
+  // 调用的mtr 也只是把lock 放到m_memo 里面, 方便在mtr_commit() 以后, 将这些Lock
+  // 资源释放
+  //
   block = buf_page_get(page_id_t(TRX_SYS_SPACE, TRX_SYS_PAGE_NO),
                        univ_page_size, RW_X_LATCH, mtr);
   buf_block_dbg_add_level(block, SYNC_TRX_SYS_HEADER);
@@ -341,6 +346,9 @@ trx_id_t trx_sys_get_new_trx_id() {
   Thus trx id values will not overlap when the database is
   repeatedly started! */
 
+  // 这么做只是为了减少flush 的次数, 让这个trx max_trx_id 可以保证是递增的
+  // 但是不是连续的, 每TRX_SYS_TRX_ID_WRITE_MARGIN 次才flush 一次, 这样
+  // 可以减少flush 的次数
   if (!(trx_sys->max_trx_id % TRX_SYS_TRX_ID_WRITE_MARGIN)) {
     trx_sys_flush_max_trx_id();
   }

@@ -114,6 +114,8 @@ static void buf_dblwr_init(
 
   /* There are two blocks of same size in the doublewrite
   buffer. */
+  // 这里TRX_SYS_DOUBLEWRITE_BLOCK_SIZE = fsp extent = 1MB
+  // 有2个double write buffer
   buf_size = 2 * TRX_SYS_DOUBLEWRITE_BLOCK_SIZE;
 
   /* There must be atleast one buffer for single page writes
@@ -472,7 +474,7 @@ dberr_t buf_dblwr_init_or_load_pages(pfs_os_file_t file, const char *path) {
 @param[in,out]	space		Tablespace instance to write to
 @param[in]	page_no		Page number in the tablespace
 @param[in]	page		Page data to write */
-// 这个函数处理的是double buffer 上面有没有最后一个要写入的page 是否需要recovery
+// 从double write buffer 中recover 一个page
 static void buf_dblwr_recover_page(page_no_t page_no_dblwr, fil_space_t *space,
                                    page_no_t page_no, const page_t *page) {
   byte *ptr;
@@ -519,6 +521,7 @@ static void buf_dblwr_recover_page(page_no_t page_no_dblwr, fil_space_t *space,
     BlockReporter block(true, read_buf, page_size,
                         fsp_is_checksum_disabled(space->id));
 
+    // 先检查actual page 是否有冲突
     if (block.is_corrupted()) {
       ib::info(ER_IB_MSG_106) << "Database page corruption or"
                               << " a failed file read of page " << page_id

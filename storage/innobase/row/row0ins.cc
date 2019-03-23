@@ -2539,6 +2539,8 @@ and return. don't execute actual insert. */
 
       DEBUG_SYNC_C("before_insert_pessimitic_row_ins_clust");
 
+      // 这里在BTR_MODIFY_TREE 场景, 依然是先尝试乐观insert, 如果失败了
+      // 只能执行pessimistic insert
       err = btr_cur_optimistic_insert(flags, cursor, &offsets, &offsets_heap,
                                       entry, &insert_rec, &big_rec, n_ext, thr,
                                       &mtr);

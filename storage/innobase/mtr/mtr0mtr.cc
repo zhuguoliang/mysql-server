@@ -604,6 +604,9 @@ ulint mtr_t::Command::prepare_write() {
 #endif /* !UNIV_HOTBACKUP */
 
 /** Release the latches and blocks acquired by this mini-transaction */
+// 将当前这个mtr 所持有的latch, lock 都释放.
+// 这里可以看出mtr 里面的m_memo 主要持有的是page lock, index lock
+//
 void mtr_t::Command::release_all() {
   Release_all release;
   Iterate<Release_all> iterator(release);
@@ -688,6 +691,8 @@ void mtr_t::Command::execute() {
   }
 #endif /* !UNIV_HOTBACKUP */
 
+  // 在mtr 提交以后, 把相关的资源需要做清理操作
+  // m_memo 主要是lock 相关资源
   release_all();
   release_resources();
 }

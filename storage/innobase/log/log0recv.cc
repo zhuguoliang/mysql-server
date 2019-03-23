@@ -3495,11 +3495,9 @@ static void recv_init_crash_recovery() {
   ib::info(ER_IB_MSG_727);
 
   // 这里是处理上一次关闭或者crash 以后, 是否有正在要写的page 还留在 double
-  // write buffer 里面, double write buffer 是用来保证每次写4k page 的完整性
+  // write buffer 里面, double write buffer 是用来保证每次写16k page 的完整性
   buf_dblwr_process();
 
-  // 将dirty page 从buffer pool flush 到btree, 之前已经把相应的page
-  // 都加载到buffer pool 了
   if (srv_force_recovery < SRV_FORCE_NO_LOG_REDO) {
     /* Spawn the background thread to flush dirty pages
     from the buffer pools. */
@@ -3647,6 +3645,8 @@ dberr_t recv_recovery_from_checkpoint_start(log_t &log, lsn_t flush_lsn) {
   there is something wrong we will print a message to the
   user about recovery: */
 
+  // 如果checkpoint_lsn != flush_lsn 说明这次不是正常的shutdown
+  // 那么就需要执行crash_recovery 的逻辑了
   if (checkpoint_lsn != flush_lsn) {
     if (checkpoint_lsn < flush_lsn) {
       ib::warn(ER_IB_MSG_734, ulonglong{checkpoint_lsn}, ulonglong{flush_lsn});
@@ -3661,6 +3661,7 @@ dberr_t recv_recovery_from_checkpoint_start(log_t &log, lsn_t flush_lsn) {
         return (DB_READ_ONLY);
       }
 
+      // 在crash recovery 逻辑里面就包含将double write buffer 中数据恢复的过程
       recv_init_crash_recovery();
     }
   }

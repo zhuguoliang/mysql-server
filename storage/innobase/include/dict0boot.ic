@@ -40,6 +40,9 @@ row_id_t dict_sys_get_new_row_id(void) {
 
   id = dict_sys->row_id;
 
+  // 这里将row_id 写入到dict_sys page 中, 这里和max_trx_id 一样
+  // 写256次才会更新一次, 为了减少刷盘次数
+  // 所以会出现重启以后递增的id 非连续的情况
   if (0 == (id % DICT_HDR_ROW_ID_WRITE_MARGIN)) {
     dict_hdr_flush_row_id();
   }

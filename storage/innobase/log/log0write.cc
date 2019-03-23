@@ -1398,6 +1398,8 @@ static inline size_t compute_how_much_to_write(const log_t &log,
     } else {
       /* We limit write up to the end of region
       we have written ahead already. */
+      // 走到这个分支是write ahead buffer 还有空间, 但是不够写下全部buffer
+      // 的内容, 所以就先写一部分的内容
       write_size =
           static_cast<size_t>(log.write_ahead_end_offset - real_offset);
 
@@ -1406,6 +1408,8 @@ static inline size_t compute_how_much_to_write(const log_t &log,
     }
 
   } else {
+    // write ahead buffer 的大小是大于这次要写入的buffer
+    // 因此如果这次写入的大小是大于512 的, 那么就把这个大小设置成512 对齐
     if (write_from_log_buffer) {
       write_size = ut_uint64_align_down(write_size, OS_FILE_LOG_BLOCK_SIZE);
     }
@@ -1626,7 +1630,8 @@ static void log_files_write_buffer(log_t &log, byte *buffer, size_t buffer_size,
   bool write_from_log_buffer;
 
 
-  // 这个地方主要是操作write_ahead buffer 的地方
+  // write_size 必须是512 对齐的
+  // 还必须考虑write_ahead_buffer 的size
   auto write_size = compute_how_much_to_write(log, real_offset, buffer_size,
                                               write_from_log_buffer);
 
@@ -1643,6 +1648,9 @@ static void log_files_write_buffer(log_t &log, byte *buffer, size_t buffer_size,
   uint64_t written_ahead = 0;
   lsn_t lsn_advance = write_size;
 
+  // write_from_log_buffer = 1 表示的是从redo log 的log buffer 进行写入
+  // write_from_log_buffer = 0 表示的是从redo log 的write ahead buffer 进行写入
+  // 那么就需要将log buffer 的内容拷贝到write ahead buffer 才可以
   if (write_from_log_buffer) {
     /* We have at least one completed log block to write.
     We write completed blocks from the log buffer. Note,
@@ -1900,6 +1908,8 @@ static void log_writer_write_buffer(log_t &log, lsn_t next_write_lsn) {
 
   /* Wait until there is free space in log files.*/
 
+  // 检查redo log 是否有足够的空间, 如果没有足够的空间, 需要先做checkpoint,
+  // 让一部分redo log 往下刷, 腾出空间
   const lsn_t checkpoint_limited_lsn =
       log_writer_wait_on_checkpoint(log, last_write_lsn, next_write_lsn);
 

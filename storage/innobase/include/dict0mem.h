@@ -1020,6 +1020,12 @@ struct dict_index_t {
                                when InnoDB was started up */
   zip_pad_info_t zip_pad;      /*!< Information about state of
                                compression failures and successes */
+  // 这个lock 就是我们常说的index->lock
+  // 当需要对这个index 的btree 修改的时候, 我们通常要获得这个lock
+  // 这个lock 也是用来保护整个btree 的结构的
+  // 正常的读取只需要加r lock, 当需要修改的时候, 就加w 锁.
+  // 所以这个lock 很容易成为写入的瓶颈
+
   rw_lock_t lock;              /*!< read-write lock protecting the
                                upper levels of the index tree */
   bool fill_dd;                /*!< Flag whether need to fill dd tables
