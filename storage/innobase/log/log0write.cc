@@ -1380,6 +1380,9 @@ static inline size_t compute_how_much_to_write(const log_t &log,
         skipping last fragment for which the write ahead
         is required. */
 
+        // 当前的write_ahead 不够, 又扩展了一个write_ahead 还是不够,
+        // 那么这次就只写入到扩展到的新的这个write_ahead 位置, 所以写入的大小是
+        // next_wa - real_offset 的大小
         ut_a(write_from_log_buffer);
 
         write_size = next_wa - real_offset;
@@ -1524,6 +1527,8 @@ static inline void copy_to_write_ahead_buffer(log_t &log, const byte *buffer,
   ut_a(incomplete_block + incomplete_size <=
        write_buf + srv_log_write_ahead_size);
 
+  // 将redo log 的log buffer 直接拷贝到 write_ahead_buf 以后,
+  // 需要考虑把最后一个uncomplete block 的header, tailer 信息补全
   if (incomplete_size != 0) {
     /* Prepare the incomplete (last) block. */
     ut_a(incomplete_size >= LOG_BLOCK_HDR_SIZE);
@@ -1542,11 +1547,14 @@ static inline void copy_to_write_ahead_buffer(log_t &log, const byte *buffer,
 
     log_block_set_checkpoint_no(incomplete_block, checkpoint_no);
 
+    // 这里的memset 填0 是把一个redo log 里面的block 填0
+    // 并不是把write ahead buffer 的block 填0
     std::memset(incomplete_block + incomplete_size, 0x00,
                 OS_FILE_LOG_BLOCK_SIZE - incomplete_size);
 
     log_block_store_checksum(incomplete_block);
 
+    // 最后会把这个write_size 向上取整到 512, 也就是把最后一个block 补齐
     size = completed_blocks_size + OS_FILE_LOG_BLOCK_SIZE;
   }
 
@@ -1613,6 +1621,7 @@ static inline void update_current_write_ahead(log_t &log, uint64_t real_offset,
 
 }  // namespace Log_files_write_impl
 
+// 这里buffer 的地址已经是512 对齐的地址
 static void log_files_write_buffer(log_t &log, byte *buffer, size_t buffer_size,
                                    lsn_t start_lsn) {
   ut_ad(log_writer_mutex_own(log));
@@ -1629,7 +1638,6 @@ static void log_files_write_buffer(log_t &log, byte *buffer, size_t buffer_size,
 
   bool write_from_log_buffer;
 
-
   // write_size 必须是512 对齐的
   // 还必须考虑write_ahead_buffer 的size
   auto write_size = compute_how_much_to_write(log, real_offset, buffer_size,
@@ -1641,7 +1649,7 @@ static void log_files_write_buffer(log_t &log, byte *buffer, size_t buffer_size,
   }
 
   // 在这里把每一个512 byte 所需要的header, checksum 信息准备好
-  // 这里有可能涉及多个block, 涉及的长队有write_size 这么长
+  // 这里有可能涉及多个block
   prepare_full_blocks(log, buffer, write_size, start_lsn, checkpoint_no);
 
   byte *write_buf;
@@ -1670,6 +1678,8 @@ static void log_files_write_buffer(log_t &log, byte *buffer, size_t buffer_size,
     copy_to_write_ahead_buffer(log, buffer, write_size, start_lsn,
                                checkpoint_no);
 
+    // 说明这次写入了内容超过了上一次write ahead buffer 的内容
+    // 因此需要申请一个新的write_ahead buffer, 然后对多余的write ahead buffer 填上0
     if (!current_write_ahead_enough(log, real_offset, 1)) {
       written_ahead = prepare_for_write_ahead(log, real_offset, write_size);
     }
@@ -1950,7 +1960,9 @@ static void log_writer_write_buffer(log_t &log, lsn_t next_write_lsn) {
 
   /* Do the write to the log files */
   // 这里是最后实际写入数据的地方
-  // 这里会保证buf_end, buf_begin 在一个block size 大小以内
+  // 上面会修改了buf_begin 的位置, 保证是从512 字节开始对齐写入的
+  // 这样也是为了避免copy-on-write, 避免在写512
+  // 字节的时候需要从底下读取之前512 Block 前面部分的内容
   log_files_write_buffer(
       log, buf_begin, buf_end - buf_begin,
       ut_uint64_align_down(last_write_lsn, OS_FILE_LOG_BLOCK_SIZE));

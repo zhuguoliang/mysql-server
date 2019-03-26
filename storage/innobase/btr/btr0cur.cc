@@ -3546,6 +3546,7 @@ func_exit:
  @retval DB_UNDERFLOW if the page would become too empty
  @retval DB_ZIP_OVERFLOW if there is not enough space left
  on the compressed page (IBUF_BITMAP_FREE was reset outside mtr) */
+// 尝试在当前page 直接更新这个record
 dberr_t btr_cur_optimistic_update(
     ulint flags,         /*!< in: undo logging and locking flags */
     btr_cur_t *cursor,   /*!< in: cursor on the record to update;

@@ -2411,6 +2411,7 @@ and return. don't execute actual insert. */
 
   if (mode == BTR_MODIFY_LEAF && dict_index_is_online_ddl(index)) {
     mode = BTR_MODIFY_LEAF | BTR_ALREADY_S_LATCHED;
+    // 对当前这个index btree 加上s lock
     mtr_s_lock(dict_index_get_lock(index), &mtr);
   }
 
@@ -2427,6 +2428,7 @@ and return. don't execute actual insert. */
 #ifdef UNIV_DEBUG
   {
     page_t *page = btr_cur_get_page(cursor);
+    // 先获得infimum rec 然后在next 就获得这个page 里面的第一个record 了
     rec_t *first_rec = page_rec_get_next(page_get_infimum_rec(page));
 
     ut_ad(page_rec_is_supremum(first_rec) ||
@@ -2498,6 +2500,8 @@ and return. don't execute actual insert. */
   /* Note: Allowing duplicates would qualify for modification of
   an existing record as the new entry is exactly same as old entry.
   Avoid this check if allow duplicates is enabled. */
+  // 这里判断一下是否允许重复主键, 如果不允许重复主键, 并且当前index
+  // 里面已经包含这个cursor 对应的key, 那么就进行update 操作
   if (!index->allow_duplicates && row_ins_must_modify_rec(cursor)) {
     /* There is already an index entry with a long enough common
     prefix, we must convert the insert into a modify of an
@@ -2524,8 +2528,10 @@ and return. don't execute actual insert. */
     mtr.commit();
     mem_heap_free(entry_heap);
   } else {
+    // 这个分支就进入到了Insert 操作
     rec_t *insert_rec;
 
+    // 如果当前的mode 不会修改btree 结构, 那么就进入到optimistic_insert 流程
     if (mode != BTR_MODIFY_TREE) {
       ut_ad((mode & ~BTR_ALREADY_S_LATCHED) == BTR_MODIFY_LEAF);
       err = btr_cur_optimistic_insert(flags, cursor, &offsets, &offsets_heap,
@@ -2584,6 +2590,7 @@ func_exit:
     mem_heap_free(offsets_heap);
   }
 
+  // open 一个pcur 以后, 都需要进行一个close 操作
   btr_pcur_close(&pcur);
 
   DBUG_EXECUTE_IF("ib_sdi", if (dict_table_is_sdi(index->table->id)) {
