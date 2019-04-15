@@ -871,8 +871,10 @@ struct dict_index_t {
   id_name_t name;         /*!< index name */
   const char *table_name; /*!< table name */
   dict_table_t *table;    /*!< back pointer to table */
+  // 这个index 的root 节点所在的space
   unsigned space : 32;
   /*!< space where the index tree is placed */
+  // 这个index 的root 节点所在的page
   unsigned page : 32; /*!< index tree root page number */
   unsigned merge_threshold : 6;
   /*!< In the pessimistic delete, if the page

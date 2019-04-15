@@ -1366,7 +1366,7 @@ static inline size_t compute_how_much_to_write(const log_t &log,
 
   /* Check how much we have written ahead to avoid read-on-write. */
 
-  // 如果这个write ahead buffer 的大小不够大
+  // 如果这个write ahead buffer 的size不够大
   if (!current_write_ahead_enough(log, real_offset, write_size)) {
     if (!current_write_ahead_enough(log, real_offset, 1)) {
       /* Current write-ahead region has no space at all. */

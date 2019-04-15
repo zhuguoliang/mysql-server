@@ -4725,6 +4725,7 @@ dberr_t row_search_mvcc(byte *buf, page_cur_mode_t mode,
       }
     }
 
+    // btr_pcur_open 
     btr_pcur_open_with_no_init(index, search_tuple, mode, BTR_SEARCH_LEAF, pcur,
                                0, &mtr);
 
@@ -4768,6 +4769,7 @@ rec_loop:
 
   prebuilt->lob_undo_reset();
 
+  // TODO? 什么叫 trx 被 interrupted?
   if (trx_is_interrupted(trx)) {
     if (!spatial_search) {
       btr_pcur_store_position(pcur, &mtr);
@@ -4952,6 +4954,7 @@ rec_loop:
   we have to recompare rec and search_tuple to determine if they
   match enough. */
 
+  // 这里查询是非like 查询, else 里面是 like 的查询
   if (match_mode == ROW_SEL_EXACT) {
     /* Test if the index record matches completely to search_tuple
     in prebuilt: if not, then we return with DB_RECORD_NOT_FOUND */
@@ -4977,6 +4980,7 @@ rec_loop:
         }
       }
 
+      // TODO store_position 有什么用
       btr_pcur_store_position(pcur, &mtr);
 
       /* The found record was not a match, but may be used
@@ -5030,6 +5034,7 @@ rec_loop:
   set: the cursor is now placed on a user record */
 
   if (prebuilt->select_lock_type != LOCK_NONE) {
+    // 当前的lock 类型是有Lock 的, 比如常见的select * for update 这种
     /* Try to place a lock on the index record; note that delete
     marked records are a special case in a unique search. If there
     is a non-delete marked record, then it is enough to lock its
@@ -5147,6 +5152,7 @@ rec_loop:
         goto lock_wait_or_error;
     }
   } else {
+    // 当前的read 是non-locking read, 也就是我们最常见的 mvcc read
     /* This is a non-locking consistent read: if necessary, fetch
     a previous version of the record */
 
@@ -5155,16 +5161,20 @@ rec_loop:
       latest version of the record */
 
     } else if (index == clust_index) {
+      // 如果查找的index 是cluster index
       /* Fetch a previous version of the row if the current
       one is not visible in the snapshot; if we have a very
       high force recovery level set, we try to avoid crashes
       by skipping this lookup */
 
       if (srv_force_recovery < 5 &&
+          // 这里如果serch 的是主键索引, 那么再通过readview 比较一下这个数据的可见性
           !lock_clust_rec_cons_read_sees(rec, index, offsets,
                                          trx_get_read_view(trx))) {
         rec_t *old_vers;
         /* The following call returns 'offsets' associated with 'old_vers' */
+        // 如果当前这条Record 是当前事务是不可见的, 那么就需要通过undo log
+        // 去找到可见的版本
         err = row_sel_build_prev_vers_for_mysql(
             trx->read_view, clust_index, prebuilt, rec, &offsets, &heap,
             &old_vers, need_vrow ? &vrow : NULL, &mtr,
@@ -5185,6 +5195,9 @@ rec_loop:
         prev_rec = rec;
       }
     } else {
+      // 如果查找的是非主键索引,
+      // 那么同样也需要知道当前事务的可见版本应该是哪一个
+      // 只能通过找到对应的cluster index, 然后在cluster index 里面判断可见性
       /* We are looking into a non-clustered index,
       and to get the right version of the record we
       have to look also into the clustered index: this

@@ -695,6 +695,7 @@ inline void btr_pcur_t::open_no_init(dict_index_t *index, const dtuple_t *tuple,
         index, 0, tuple, mode, cur, file, line, mtr,
         ((latch_mode & BTR_MODIFY_LEAF) ? true : false));
   } else {
+    // 在打开一个 btr_pcur_t 的时候, 就会通过search_to_nth_level 进行查找了 
     btr_cur_search_to_nth_level(index, 0, tuple, mode, latch_mode, cur,
                                 has_search_latch, file, line, mtr);
   }

@@ -7540,6 +7540,7 @@ into segments (see os0file.cc for more info). The thread specifies which
 segment it wants to wait for.
 @param[in]	segment		The number of the segment in the AIO array
                                 to wait for */
+// 每一个线程处理自己对应的segment
 void fil_aio_wait(ulint segment) {
   fil_node_t *file;
   IORequest type;
@@ -7547,6 +7548,7 @@ void fil_aio_wait(ulint segment) {
 
   ut_ad(fil_validate_skip());
 
+  // os_aio_handler 会具体执行同步io
   dberr_t err = os_aio_handler(segment, &file, &message, &type);
 
   ut_a(err == DB_SUCCESS);

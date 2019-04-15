@@ -698,6 +698,9 @@ class AIO {
 
   /** Pointer to the slots in the array.
   Number of elements must be divisible by n_threads. */
+  // 这里m_slots 是一个 Slot vector, 所有进入这个Array 的IO 都会进入到这个
+  // vector, 然后在Slot 里面 slot.num() / m_n_segment 指定到某一个队列
+  // 这里m_slots.size() 就是这个array 总的slot 数
   Slots m_slots;
 
   /** Number of segments in the aio array of pending aio requests.
@@ -6039,6 +6042,7 @@ bool AIO::start(ulint n_per_seg, ulint n_readers, ulint n_writers,
 
   srv_reset_io_thread_op_info();
 
+  // 这里n_readers 就对应n 个segment
   s_reads =
       create(LATCH_ID_OS_AIO_READ_MUTEX, n_readers * n_per_seg, n_readers);
 
@@ -6123,6 +6127,7 @@ bool AIO::start(ulint n_per_seg, ulint n_readers, ulint n_writers,
     return (false);
   }
 
+  // 对于每一个segment 都会有一个os_event
   for (ulint i = 0; i < n_segments; ++i) {
     os_aio_segment_wait_events[i] = os_event_create(0);
   }
@@ -6374,6 +6379,14 @@ void os_aio_wait_until_no_pending_writes() {
 @param[in]	slot		slot in this array
 @return segment number (which is the number used by, for example,
         I/O-handler threads) */
+// 这里segment 是全局的
+// s_ibuf array segment 是 IO_IBUF_SEGMENT 0
+// s_log array sgemtn 是 IO_LOG_SEGMENT 1
+// 然后 s_reads/s_writes 有多个segment, 每一个segment
+// 个数是m_slots.size()/m_n_segment 个数
+//
+// 这里如果是read_only_mode 的话, 就没有s_ibuf, s_log 的segment
+// 因此s_reads, s_writes 的segment 就从0 开始计数
 ulint AIO::get_segment_no_from_slot(const AIO *array, const Slot *slot) {
   ulint segment;
   ulint seg_len;
@@ -6389,14 +6402,17 @@ ulint AIO::get_segment_no_from_slot(const AIO *array, const Slot *slot) {
     segment = IO_LOG_SEGMENT;
 
   } else if (array == s_reads) {
+    // seg_len 表示每一个segment 包含的slots 个数
     seg_len = s_reads->slots_per_segment();
 
+    // 那么slot->pos / seg_len 就知道具体的segment number
     segment = (srv_read_only_mode ? 0 : 2) + slot->pos / seg_len;
   } else {
     ut_a(array == s_writes);
 
     seg_len = s_writes->slots_per_segment();
 
+    // segment 号是全局的
     segment = s_reads->m_n_segments + (srv_read_only_mode ? 0 : 2) +
               slot->pos / seg_len;
   }
@@ -6438,6 +6454,7 @@ Slot *AIO::reserve_slot(IORequest &type, fil_node_t *m1, void *m2,
   doing simulated AIO */
   ulint local_seg;
 
+  // 在write 的时候 是可以知道当前要write 文件的位置偏移量, 那么
   local_seg = (offset >> (UNIV_PAGE_SIZE_SHIFT + 6)) % m_n_segments;
 
   for (;;) {
@@ -6465,12 +6482,15 @@ Slot *AIO::reserve_slot(IORequest &type, fil_node_t *m1, void *m2,
   /* We start our search for an available slot from our preferred
   local segment and do a full scan of the array. We are
   guaranteed to find a slot in full scan. */
+  // 从根据offset 算出的local_seg 开始查找, 也就是从对应的segment header
+  // 开始找空闲的slot
   for (ulint i = local_seg * slots_per_seg; counter < m_slots.size();
        ++i, ++counter) {
     i %= m_slots.size();
 
     slot = at(i);
 
+    // is_reserved == false 表示该slot 没有被预留, 是空闲的
     if (slot->is_reserved == false) {
       break;
     }
@@ -6481,6 +6501,7 @@ Slot *AIO::reserve_slot(IORequest &type, fil_node_t *m1, void *m2,
 
   ut_a(slot->is_reserved == false);
 
+  // m_n_reserved 表示的就是在这个IO 队列里面被 reserved 的slot 个数
   ++m_n_reserved;
 
   if (m_n_reserved == 1) {
@@ -6650,7 +6671,12 @@ for a local segment in the AIO array.
 void AIO::wake_simulated_handler_thread(ulint global_segment, ulint segment) {
   ut_ad(!srv_use_native_aio);
 
+  // m_slots.size() / m_n_segment 就可以算出每一个segment 占用多少个slot
   ulint n = slots_per_segment();
+  // segment 是当前的segment, 那么 segment * n 就到了这个segment 所在的offset
+  // 这个m_slots 就是一个vector, 找到这个offset 以后, 就从这个m_slot[offset]
+  // 开始遍历
+  // 为什么这样做, 为的是把相近的slot 放在同一个segment 上
   ulint offset = segment * n;
 
   /* Look through n slots after the segment * n'th slot */
@@ -6974,6 +7000,7 @@ try_again:
 
   Slot *slot;
 
+  // 从对应的array 找对空闲的slot
   slot = array->reserve_slot(type, m1, m2, file, name, buf, offset, n);
 
   if (type.is_read()) {
@@ -7207,6 +7234,8 @@ class SimulatedAIOHandler {
   }
 
   /** Do the I/O with ordinary, synchronous i/o functions: */
+  // 这里是simulator IO 最后执行synchronous IO 的地方
+  // 这里因为在每次io() 之前, 都会执行merge() 操作, 因此这里已经转化成了顺序写了
   void io() {
     if (first_slot()->type.is_write()) {
       for (ulint i = 0; i < m_n_elems; ++i) {
@@ -7430,6 +7459,7 @@ static dberr_t os_aio_simulated_handler(ulint global_segment, fil_node_t **m1,
   ulint segment;
   os_event_t event = os_aio_segment_wait_events[global_segment];
 
+  // 根据global_segment 算出当前的 segment
   segment = AIO::get_array_and_local_segment(&array, global_segment);
 
   SimulatedAIOHandler handler(array, segment);
@@ -7451,6 +7481,10 @@ static dberr_t os_aio_simulated_handler(ulint global_segment, fil_node_t **m1,
 
     ulint n_reserved;
 
+    // 这里如果返回的slot != NULL 说明有一个IO 已经完成了, 但是还没有通知上层
+    // 如果n_reserved == 0, 说明一个is_reserved 的slot 都没有, 所以不需要执行IO
+    // 操作
+    // 如果n_reserved !=0, 说明这个时候才需要执行IO 操作
     slot = handler.check_completed(&n_reserved);
 
     if (slot != NULL) {

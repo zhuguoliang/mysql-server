@@ -757,6 +757,7 @@ struct row_prebuilt_t {
                                store it here so that we can return
                                it to MySQL */
   /*----------------------*/
+  // 是否支持从sql 层条件下推到InnoDB
   bool idx_cond;         /*!< True if index condition pushdown
                          is used, false otherwise. */
   ulint idx_cond_n_cols; /*!< Number of fields in idx_cond_cols.

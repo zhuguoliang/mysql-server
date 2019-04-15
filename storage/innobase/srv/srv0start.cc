@@ -2084,6 +2084,8 @@ dberr_t srv_start(bool create_new_db, const std::string &scan_directories) {
 
   /* Create i/o-handler threads: */
 
+  // 这里初始化和 io 相关的线程
+  // 如果是 read_only_mode, 那就不需要ibuf, log io thread
   /* For read only mode, we don't need ibuf and log I/O thread.
   Please see innobase_start_or_create_for_mysql() */
   ulint start = (srv_read_only_mode) ? 0 : 2;
