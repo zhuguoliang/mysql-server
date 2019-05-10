@@ -2767,6 +2767,10 @@ static ulint srv_do_purge(
       old_activity_count = srv_get_activity_count();
     }
 
+    // 这里会动态调整purge thread number, 如果trx_sys->rseg_history_len > 0
+    // 或者 rseg_history_len > srv_max_purge_lag(允许最大的没有purge 的undo log
+    // 个数), 那么就增加thread. 否则srv_check_activity, 减少purge thread
+    // 所以purge thread number 的个数是不固定的
     /* Ensure that the purge threads are less than what
     was configured. */
 
@@ -2928,14 +2932,18 @@ void srv_purge_coordinator_thread() {
 
   rw_lock_x_unlock(&purge_sys->latch);
 
+  // srv_sys->sys_threads 管理者InnoDB 所有的thread
+  // 这里从sys_threads 找到一个slot, 并标记这个thread 正在运行
   slot = srv_reserve_slot(SRV_PURGE);
 
+  // 获得当前trx sys 的 undo log history list 长度
   ulint rseg_history_len = trx_sys->rseg_history_len;
 
   do {
     /* If there are no records to purge or the last
     purge didn't purge any records then wait for activity. */
 
+    // 如果上一次purge 的元素个数只有0 个, 那么purge thread sleep 一段时间
     if (srv_shutdown_state == SRV_SHUTDOWN_NONE &&
         (purge_sys->state == PURGE_STATE_STOP || n_total_purged == 0)) {
       srv_purge_coordinator_suspend(slot, rseg_history_len);

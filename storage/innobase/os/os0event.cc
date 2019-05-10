@@ -227,6 +227,11 @@ struct os_event {
   );
 
  private:
+  // 这里m_set = true 的时候, 说明这个cond_var 刚刚被pthread_cond_broadcast() 过
+  // 所以wait 在这个cond_var 上的线程都已经被唤醒了
+  //
+  // 每当有一个线程执行wait_low() 的时候, 都会把这个m_set 设置成false,
+  // 表示有线程等待在这个cond_var 上
   bool m_set;           /*!< this is true when the
                         event is in the signaled
                         state, i.e., a thread does

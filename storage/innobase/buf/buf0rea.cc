@@ -207,6 +207,8 @@ ulint buf_read_ahead_random(const page_id_t &page_id,
     return (0);
   }
 
+  // 这里buf_read_ahead_random_area = 64, 所以low, high 就是在这个64 个page
+  // 这个对齐的区间
   low = (page_id.page_no() / buf_read_ahead_random_area) *
         buf_read_ahead_random_area;
 
@@ -245,6 +247,7 @@ ulint buf_read_ahead_random(const page_id_t &page_id,
         buf_page_peek_if_young(bpage)) {
       recent_blocks++;
 
+      // 这里算出来BUF_READ_AHEAD_RANDOM_THRESHOLD = 13
       if (recent_blocks >= BUF_READ_AHEAD_RANDOM_THRESHOLD(buf_pool)) {
         rw_lock_s_unlock(hash_lock);
         goto read_ahead;

@@ -86,6 +86,11 @@ inline static Wait_stats os_event_wait_for(os_event_t &event,
       return (Wait_stats{waits});
     }
 
+    // 这里这个if 分支是先通过spin, 所以这里每一次只是把这个spins_limit--
+    // 然后又进入到这个while loop, 检查一下condition(wait) 是否是ture 的
+    // 如果是ture 的, 说明这里os_event_wait_for 通过spin 就达到了可用,
+    // 不需要进入到pthread_cond_wait 阶段
+    // 所以这个函数os_event_wait_for 是 spin + os_event 的组合
     if (!wait) {
       /* It's still spin-delay loop. */
       --spins_limit;
@@ -96,6 +101,19 @@ inline static Wait_stats os_event_wait_for(os_event_t &event,
       /* Event-based loop. */
       ++waits;
 
+      // 这里也会动态的调整 pthread_cond_wait 时候 timeout 的时间
+      // 在每一次pthread_cond_wait 超时返回以后, 会加大这个timeout 的时间
+      // 这里是每4次 pthread_cond_wait 超时返回后, 这个超时的时间 * 2
+      // 所以就是
+      // 1. timeout
+      // 2. timeout
+      // 3. timeout
+      // 4. timeout
+      // 5. 2 * timeout
+      // ...
+      // 9. 4 * timeout
+      // ...
+      // 13. 8 * timeout
       if (waits == next_level) {
         timeout = std::min(timeout * 2, MAX_TIMEOUT_US);
 

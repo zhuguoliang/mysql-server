@@ -7549,6 +7549,7 @@ void fil_aio_wait(ulint segment) {
   ut_ad(fil_validate_skip());
 
   // os_aio_handler 会具体执行同步io
+  // 这个函数返回之后, 是有IO 已经完成了
   dberr_t err = os_aio_handler(segment, &file, &message, &type);
 
   ut_a(err == DB_SUCCESS);

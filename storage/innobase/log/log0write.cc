@@ -856,6 +856,7 @@ static Wait_stats log_wait_for_flush(const log_t &log, lsn_t lsn) {
   size_t slot =
       (lsn - 1) / OS_FILE_LOG_BLOCK_SIZE & (log.flush_events_size - 1);
 
+  fprintf(stderr, "baotiao: slot %lu \n", slot);
   const auto wait_stats =
       os_event_wait_for(log.flush_events[slot], max_spins,
                         srv_log_wait_for_flush_timeout, stop_condition);

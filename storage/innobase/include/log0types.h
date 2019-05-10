@@ -268,7 +268,7 @@ struct log_t {
       wake-ups are possible, in which case user threads simply retry
       waiting. */
       // 这里可以理解成log_t 中提前申请了一组的条件变量, 为什么这么做? 
-      // 其实相当于hash 因为, 让不同的线程等在不同的os_event上,
+      // 其实相当于hash 行为, 让不同的线程等在不同的os_event上,
       // 这样一个操作完成, 需要唤醒的时候, 就不会把所有的线程都唤醒了,
       // 这里分slot 的方法是
       // const auto slot =

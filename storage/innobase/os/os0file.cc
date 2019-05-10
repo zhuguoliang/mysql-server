@@ -780,9 +780,12 @@ static const int OS_AIO_IO_SETUP_RETRY_ATTEMPTS = 5;
 #endif /* LINUX_NATIVE_AIO */
 
 /** Array of events used in simulated AIO */
+// 这里一个segment 会对应一个os_event_t
+// 这里segment 是全局的, 所有的segment 数组
 static os_event_t *os_aio_segment_wait_events = NULL;
 
 /** Number of asynchronous I/O segments.  Set by os_aio_init(). */
+// 总的asynchronous I/O segments 个数
 static ulint os_aio_n_segments = ULINT_UNDEFINED;
 
 /** If the following is true, read i/o handler threads try to
@@ -6447,6 +6450,9 @@ Slot *AIO::reserve_slot(IORequest &type, fil_node_t *m1, void *m2,
 
   ut_ad(type.validate());
 
+  // 计算出每一个segment 包含的slot
+  // 其实就是当前这个AIO 包含的slot / segment 个数
+  // 就可以计算出来了
   slots_per_seg = slots_per_segment();
 
   /* We attempt to keep adjacent blocks in the same local
@@ -6454,25 +6460,42 @@ Slot *AIO::reserve_slot(IORequest &type, fil_node_t *m1, void *m2,
   doing simulated AIO */
   ulint local_seg;
 
-  // 在write 的时候 是可以知道当前要write 文件的位置偏移量, 那么
+  // 上面os_aio_func 已经找到这次要写的AIO array
+  // 这一步是要定写的是哪一个segment, 因为s_ibuf, s_log 只包含一个segment
+  // 但是 s_reads, s_writes 是包含多个segment
+  // 具体segment 的划分是连续的一段地址空间是一个segment
+  // 这里offset >> 20 位, 所以sgement 的大小是1M
   local_seg = (offset >> (UNIV_PAGE_SIZE_SHIFT + 6)) % m_n_segments;
 
   for (;;) {
     acquire();
 
+    // 这里是判断array 里面slot 里面是否有free 的, 只需要判断reserved != size 就可以
+    // 说明还是有空闲的slot, 那么就可以break 出来, 将这个空闲的slot
+    // 分配给这次的操作
+    //
+    // 如果所有的slot 都没有free 的, 那么就需要唤醒io_handler thread 去执行IO
+    // 操作, 把一些slot free 出来
     if (m_n_reserved != m_slots.size()) {
       break;
     }
 
     release();
 
+    // 这里是 simulator aio 才需要去唤醒io_handler thread, 否则只需要等等libaio
+    // 的后台线程自己执行就可以
     if (!srv_use_native_aio) {
       /* If the handler threads are suspended,
       wake them so that we get more slots */
 
+      // TODO(baotiao): 这里只是当前的array 上面没有free slot 了,
+      // 为什么需要把所有的线程都唤醒
       os_aio_simulated_wake_handler_threads();
     }
 
+    // wait 在 m_not_full 这个event 上
+    // 在io_handler thread 上, 当执行了IO 操作以后, 当前array 上面有free slot
+    // 就会去唤醒这个m_not_full event
     os_event_wait(m_not_full);
   }
 
@@ -6490,7 +6513,7 @@ Slot *AIO::reserve_slot(IORequest &type, fil_node_t *m1, void *m2,
 
     slot = at(i);
 
-    // is_reserved == false 表示该slot 没有被预留, 是空闲的
+    // is_reserved == false 表示该slot 没有被预留, 是free 的
     if (slot->is_reserved == false) {
       break;
     }
@@ -6504,6 +6527,8 @@ Slot *AIO::reserve_slot(IORequest &type, fil_node_t *m1, void *m2,
   // m_n_reserved 表示的就是在这个IO 队列里面被 reserved 的slot 个数
   ++m_n_reserved;
 
+  // 如果这个slot 是第一个被reserved 的slot, 那么需要唤醒io_handler thread
+  // 告诉他们有io 可以往下写了
   if (m_n_reserved == 1) {
     os_event_reset(m_is_empty);
   }
@@ -6512,6 +6537,8 @@ Slot *AIO::reserve_slot(IORequest &type, fil_node_t *m1, void *m2,
     os_event_reset(m_not_full);
   }
 
+  // is_reserved = true 说明这个slot 已经被别人使用了, 需要等它=false
+  // 才可以
   slot->is_reserved = true;
   slot->reservation_time = ut_time();
   slot->m1 = m1;
@@ -6659,6 +6686,7 @@ void AIO::wake_simulated_handler_thread(ulint global_segment) {
   ut_ad(!srv_use_native_aio);
 
   AIO *array;
+  // 根据global_segment 算出local segment
   ulint segment = get_array_and_local_segment(&array, global_segment);
 
   array->wake_simulated_handler_thread(global_segment, segment);
@@ -6996,6 +7024,10 @@ try_again:
 
   AIO *array;
 
+  // 先找到对应的 array
+  // 根据type 找到是s_reads, s_writes 还是s_ibuf 等等
+  // 找到AIO 以后, 还需要知道在哪一个segment 中, 其中
+  // s_ibuf, s_log 只有1个segment, 但是s_reads, s_writes 会有多个segment
   array = AIO::select_slot_array(type, read_only, aio_mode);
 
   Slot *slot;
@@ -7017,6 +7049,8 @@ try_again:
       }
 #endif /* WIN_ASYNC_IO */
     } else if (type.is_wake()) {
+      // 把这个segment 对应的io_handler_thread 唤醒执行IO 操作
+      // 在上一步reserve_slot 的时候, 已经把这个slot 的内容都填充好了
       AIO::wake_simulated_handler_thread(
           AIO::get_segment_no_from_slot(array, slot));
     }
@@ -7158,6 +7192,10 @@ class SimulatedAIOHandler {
   oldest one to prevent starvation.  If several requests have the
   same age, then pick the one at the lowest offset.
   @return true if request was selected */
+  // 这里select 整体规则是
+  // 先找age >= 2 并且age 最大的
+  // 在age 相同的情况下, 找offset 最小的
+  // 如果没有age >= 2 的slot, 那就直接找offset 最小的
   bool select() {
     if (!select_oldest()) {
       return (select_lowest_offset());
@@ -7238,6 +7276,9 @@ class SimulatedAIOHandler {
   // 这里因为在每次io() 之前, 都会执行merge() 操作, 因此这里已经转化成了顺序写了
   void io() {
     if (first_slot()->type.is_write()) {
+      // 这里虽然执行了merge 操作, 但是merge 操作并不会把这些IO
+      // 合并成一次大IO 进行写入, 还是每次都进行小IO 写入
+      // 这里的write 是调用 os_file_write_func
       for (ulint i = 0; i < m_n_elems; ++i) {
         write(m_slots[i]);
       }
@@ -7306,6 +7347,8 @@ class SimulatedAIOHandler {
 
     slot = m_array->at(offset);
 
+    // 这里merge 操作的时候, 并没有限制单次IO 的大小
+    // TODO(baotiao): 所以这里需要注意下
     for (ulint i = 0; i < m_n_slots; ++i, ++slot) {
       if (slot->is_reserved && adjacent(current, slot)) {
         current = slot;
@@ -7394,6 +7437,7 @@ class SimulatedAIOHandler {
 
  private:
   ulint m_oldest;
+  // 当前这次IO 包含的slot 个数
   ulint m_n_elems;
   os_offset_t m_lowest_offset;
 
@@ -7481,11 +7525,21 @@ static dberr_t os_aio_simulated_handler(ulint global_segment, fil_node_t **m1,
 
     ulint n_reserved;
 
-    // 这里如果返回的slot != NULL 说明有一个IO 已经完成了, 但是还没有通知上层
-    // 如果n_reserved == 0, 说明一个is_reserved 的slot 都没有, 所以不需要执行IO
-    // 操作
-    // 如果n_reserved !=0, 说明这个时候才需要执行IO 操作
+    /*
+     * 这里如果返回的slot != NULL 说明有一个IO 已经完成了, 但是还没有通知上层
+     * 如果n_reserved == 0, 说明一个is_reserved 的slot 都没有, 所以不需要执行IO
+     * 操作
+     * 如果n_reserved !=0, 说明这个时候才需要执行IO 操作
+     *
+     * 这里check_completed 检查的是 io_already_done, 也就是已经完成IO 的slot
+     * 个数
+     * n_reserved 返回具体的个数, slot 返回第一个slot
+     */
     slot = handler.check_completed(&n_reserved);
+
+    // check_completed 返回slot, 说明有io_already_done 的slot. 说是这个IO
+    // 可能由上次的io 合并操作完成的
+    // 那么break 出去以后就不需要执行io 操作了
 
     if (slot != NULL) {
       break;
@@ -7510,6 +7564,7 @@ static dberr_t os_aio_simulated_handler(ulint global_segment, fil_node_t **m1,
       return (DB_SUCCESS);
 
     } else if (handler.select()) {
+      // 这个branch 才是从io 队列里面找出需要进行io 操作的slot
       break;
     }
 
@@ -7533,6 +7588,8 @@ static dberr_t os_aio_simulated_handler(ulint global_segment, fil_node_t **m1,
 
   if (slot == NULL) {
     /* Merge adjacent requests */
+    // 把相邻的request 进行merge 操作
+    // 这里merge 操作并没有限制大小, 最大可以merge 到当前的segment 的大小
     handler.merge();
 
     /* Check if there are several consecutive blocks
@@ -7554,6 +7611,7 @@ static dberr_t os_aio_simulated_handler(ulint global_segment, fil_node_t **m1,
 
     srv_set_io_thread_op_info(global_segment, "doing file i/o");
 
+    // 这里是最后最file io 的地方
     handler.io();
 
     srv_set_io_thread_op_info(global_segment, "file i/o done");
@@ -7562,6 +7620,7 @@ static dberr_t os_aio_simulated_handler(ulint global_segment, fil_node_t **m1,
 
     array->acquire();
 
+    // 设置这个slot 的io_already_don = true
     handler.done();
 
     /* We return the messages for the first slot now, and if there

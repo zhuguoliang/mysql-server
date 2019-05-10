@@ -2162,6 +2162,10 @@ ulint trx_purge(ulint n_purge_threads, /*!< in: number of purge tasks
 
   ut_a(n_purge_threads > 0);
 
+  // 这里在运行undo purge 的时候, 如果trx_sys 里面的
+  // rseg_history_len 超过了一定的长度, 说明当前系统已经存在大量的Undo log 了,
+  // 说明这一段时间的update 操作应该太多了, 因此让后续的DML
+  // 操作都等待一段时间, 来避免系统写入量太大, 导致undo log 太多导致系统不可用
   srv_dml_needed_delay = trx_purge_dml_delay();
 
   /* The number of tasks submitted should be completed. */

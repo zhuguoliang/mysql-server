@@ -1740,6 +1740,8 @@ struct buf_pool_t {
                                after resizing buffer pool */
   ulint curr_size;             /*!< current pool size in pages */
   ulint old_size;              /*!< previous pool size in pages */
+  // 这里默认read_ahead_area = 64
+  // 这里指的是page 的个数
   page_no_t read_ahead_area;   /*!< size in pages of the area which
                                the read-ahead algorithms read if
                                invoked */
