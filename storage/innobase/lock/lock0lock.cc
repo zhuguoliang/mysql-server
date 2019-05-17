@@ -1004,6 +1004,9 @@ static trx_t *lock_sec_rec_some_has_impl(
   max trx id to the log, and therefore during recovery, this value
   for a page may be incorrect. */
 
+  // 先判断这个sec_rec 所在的page 的max_trx_id
+  // 是否比当前活跃事务链表里面的最小的trx_id 要来的小, 如果小, 说明
+  // 这个事务已经退出了, 这个sec_rec 肯定就没有implicit_lock 了
   if (max_trx_id < trx_rw_min_trx_id() && !recv_recovery_is_on()) {
     trx = 0;
 

@@ -500,6 +500,8 @@ static void log_checkpoint(log_t &log) {
     case SRV_UNIX_FSYNC:
     case SRV_UNIX_LITTLESYNC:
     case SRV_UNIX_O_DIRECT:
+    // 这里是InnoDB 默认的file_flush_method
+    // 可以看到O_DIRECT_NO_FSYNC 其实都最后也是要执行fsync 操作
     case SRV_UNIX_O_DIRECT_NO_FSYNC:
       fil_flush_file_spaces(to_int(FIL_TYPE_TABLESPACE));
   }
@@ -876,6 +878,7 @@ static bool log_consider_checkpoint(log_t &log) {
     return (false);
   }
 
+  // 这里是要写checkpoint 的地方
   log_checkpoint(log);
   return (true);
 }

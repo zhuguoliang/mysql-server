@@ -477,6 +477,8 @@ ulint buf_read_ahead_linear(const page_id_t &page_id,
 
   asc_or_desc = 1;
 
+  // 根据这个page_id == low 还是== high
+  // 来判断这个linear_read_ahead 是升序还是降序
   if (page_id.page_no() == low) {
     asc_or_desc = -1;
   }
@@ -510,6 +512,8 @@ ulint buf_read_ahead_linear(const page_id_t &page_id,
       int res =
           ut_ulint_cmp(buf_page_is_accessed(bpage), pred_bpage_is_accessed);
       /* Accesses not in the right order */
+      // 这个extent 里面的64 个page 的first access time 应该是递增, 或者是递减的
+      // 这里递增还是递减, 根据的是page_id 算出来的 asc_or_desc
       if (res != 0 && res != asc_or_desc) {
         fail_count++;
       }

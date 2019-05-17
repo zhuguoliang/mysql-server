@@ -910,6 +910,7 @@ class RecLock {
   Calculate the record lock physical size required, non-predicate lock.
   @param[in] page		For non-predicate locks the buffer page
   @return the size of the lock data structure required in bytes */
+  // 这里要建立一个lock 的时候 size 是根据这个page 里面具体的record 数
   static size_t lock_size(const page_t *page) {
     ulint n_recs = page_dir_get_n_heap(page);
 

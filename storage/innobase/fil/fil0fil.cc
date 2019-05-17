@@ -6951,6 +6951,10 @@ void Fil_shard::write_completed(fil_node_t *file) {
 
   file->modification_counter = m_modification_counter;
 
+  // 这里判断是否把 buffer io disable
+  // 如果是system_tablespace 并且 innodb_flush_method = SRV_UNIX_O_DIRECT_NO_FSYNC
+  // 就不走buffer io, 否则会把这个space 加入到unflushed_list
+  // 但是我们默认的 innode_flush_method = SRV_UNIX_FSYNC
   if (fil_buffering_disabled(file->space)) {
     /* We don't need to keep track of unflushed
     changes as user has explicitly disabled
@@ -6960,6 +6964,8 @@ void Fil_shard::write_completed(fil_node_t *file) {
     file->flush_counter = file->modification_counter;
 
   } else {
+    // 把这个file space 加入到unflushed_spaces list 上
+    // 表示这个file spaces 有未flush page
     add_to_unflushed_list(file->space);
   }
 }
@@ -6977,6 +6983,7 @@ void Fil_shard::complete_io(fil_node_t *file, const IORequest &type) {
 
   ut_ad(type.validate());
 
+  // 如果是write 操作
   if (type.is_write()) {
     ut_ad(!srv_read_only_mode || fsp_is_system_temporary(file->space->id));
 
@@ -7549,7 +7556,7 @@ void fil_aio_wait(ulint segment) {
   ut_ad(fil_validate_skip());
 
   // os_aio_handler 会具体执行同步io
-  // 这个函数返回之后, 是有IO 已经完成了
+  // 这个函数返回之后, 有IO 已经完成了
   dberr_t err = os_aio_handler(segment, &file, &message, &type);
 
   ut_a(err == DB_SUCCESS);
@@ -7565,6 +7572,8 @@ void fil_aio_wait(ulint segment) {
 
   shard->mutex_acquire();
 
+  // complete_io 在fil 层面, 因为这个space 被修改过了
+  // 所以会把这个space 加入到对应的unflush_list space 上
   shard->complete_io(file, type);
 
   shard->mutex_release();

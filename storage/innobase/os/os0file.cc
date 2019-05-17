@@ -785,7 +785,12 @@ static const int OS_AIO_IO_SETUP_RETRY_ATTEMPTS = 5;
 static os_event_t *os_aio_segment_wait_events = NULL;
 
 /** Number of asynchronous I/O segments.  Set by os_aio_init(). */
-// 总的asynchronous I/O segments 个数
+// os_aio_n_segments 是所有的segment 数总和
+// s_buf array = 1
+// s_log array = 1
+// s_reads array = number of read_thread 配置项 innodb_read_io_threads
+// s_writes array = number of write_thread 配置项 innodb_write_io_threads
+// os_aio_n_segment 是以上array 的总和
 static ulint os_aio_n_segments = ULINT_UNDEFINED;
 
 /** If the following is true, read i/o handler threads try to
@@ -4901,6 +4906,10 @@ static MY_ATTRIBUTE((warn_unused_result)) ssize_t
     }
   }
 
+  // SyncFileIO 是对 pread, pwrite 的封装
+  // 处理的是一次pread, pwrite 不能一次把 n 大小的IO 都写完,
+  // 那么就多次调用pread/pwrite 把剩下的IO 写完的过程
+  //
   SyncFileIO sync_file_io(file, buf, n, offset);
 
   for (ulint i = 0; i < NUM_RETRIES_ON_PARTIAL_IO; ++i) {
@@ -6513,7 +6522,8 @@ Slot *AIO::reserve_slot(IORequest &type, fil_node_t *m1, void *m2,
 
     slot = at(i);
 
-    // is_reserved == false 表示该slot 没有被预留, 是free 的
+    // false 表示该slot 没有被预留, 是free 的
+    // 那么就可以使用这个slot
     if (slot->is_reserved == false) {
       break;
     }
@@ -6742,6 +6752,9 @@ void os_aio_simulated_wake_handler_threads() {
 
   os_aio_recommend_sleep_for_read_threads = false;
 
+  // os_aio_n_segment 是所有的segment 的总和
+  // segment 和 thread 是1对1 的关系
+  // 所以这里要wake up 所有的thread
   for (ulint i = 0; i < os_aio_n_segments; i++) {
     AIO::wake_simulated_handler_thread(i);
   }
@@ -7348,6 +7361,7 @@ class SimulatedAIOHandler {
     slot = m_array->at(offset);
 
     // 这里merge 操作的时候, 并没有限制单次IO 的大小
+    // 这里单次IO 的大小就是m_n_slots 的大小
     // TODO(baotiao): 所以这里需要注意下
     for (ulint i = 0; i < m_n_slots; ++i, ++slot) {
       if (slot->is_reserved && adjacent(current, slot)) {
@@ -7565,6 +7579,9 @@ static dberr_t os_aio_simulated_handler(ulint global_segment, fil_node_t **m1,
 
     } else if (handler.select()) {
       // 这个branch 才是从io 队列里面找出需要进行io 操作的slot
+      // 如果select() 返回true, 说明有slot 需要进行io 操作
+      // 如果select() 返回false, 那么就wait 在这个os_aio_segment_wait_events 上
+      // 等有需要io 的slot 了, 会把这个event 唤醒
       break;
     }
 
@@ -7597,6 +7614,8 @@ static dberr_t os_aio_simulated_handler(ulint global_segment, fil_node_t **m1,
 
     srv_set_io_thread_op_info(global_segment, "consecutive i/o requests");
 
+    // 目前simulator AIO 已经把combining buffer 关闭了, 把多个slots 合并成一个
+    // 大的slot, 后续write 的时候, 就可以直接进行一次大write 操作了
     // Note: We don't support write combining for simulated AIO.
     // ulint	total_len = handler.allocate_buffer();
 
@@ -7612,10 +7631,13 @@ static dberr_t os_aio_simulated_handler(ulint global_segment, fil_node_t **m1,
     srv_set_io_thread_op_info(global_segment, "doing file i/o");
 
     // 这里是最后最file io 的地方
+    // 这里是 synchronous io
     handler.io();
 
     srv_set_io_thread_op_info(global_segment, "file i/o done");
 
+    // simulator io 的 io_complete 是不需要做任何事情的
+    // 因为handler.io() 是同步io
     handler.io_complete();
 
     array->acquire();
