@@ -618,12 +618,19 @@ request is really for a 'gap' type lock */
   ut_ad(trx && lock2);
   ut_ad(lock_get_type_low(lock2) == LOCK_REC);
 
+  // 当前trx != lock2->trx, 否则因为是同一个trx 就不需要wait
+  // 并且判断当前lock 是否有 lock2 兼容
+  // 比如当前申请S lock, 而lock2 是S lock, 那么这两个Lock 就是兼容的
+  // 如果兼容就不需要wait, 否则继续走更细是否需要wait 判断逻辑
   if (trx != lock2->trx &&
       !lock_mode_compatible(static_cast<lock_mode>(LOCK_MODE_MASK & type_mode),
                             lock_get_mode(lock2))) {
     /* We have somewhat complex rules when gap type record locks
     cause waits */
 
+    // 如果这个lock 只是GAP 或者在supermum(在supermum 的经常都被看出GAP)
+    // 并且lock mode 不是insert intention, 那么不需要wait
+    // TODO(baotiao): 不过insert intention 本身不就是互不冲突的么
     if ((lock_is_on_supremum || (type_mode & LOCK_GAP)) &&
         !(type_mode & LOCK_INSERT_INTENTION)) {
       /* Gap type locks without LOCK_INSERT_INTENTION flag
@@ -634,6 +641,8 @@ request is really for a 'gap' type lock */
       return (false);
     }
 
+    // 要申请的是非insert_intention, 已有的lock 是gap 类型, 那么就不需要wait
+    // TODO(baotiao): why
     if (!(type_mode & LOCK_INSERT_INTENTION) && lock_rec_get_gap(lock2)) {
       /* Record lock (LOCK_ORDINARY or LOCK_REC_NOT_GAP
       does not need to wait for a gap type lock */
@@ -641,6 +650,7 @@ request is really for a 'gap' type lock */
       return (false);
     }
 
+    // 要申请的是GAP, lock2 是非gap 类型, 那么就不需要 wait
     if ((type_mode & LOCK_GAP) && lock_rec_get_rec_not_gap(lock2)) {
       /* Lock on gap does not need to wait for
       a LOCK_REC_NOT_GAP type lock */
@@ -648,6 +658,11 @@ request is really for a 'gap' type lock */
       return (false);
     }
 
+    // 如果lock2 包含insert intention lock
+    // 那么就无需等待
+    // 因为insert intention lock 只是在insert 的时候加入的, 当他具体要写入一个id
+    // 的时候, 还会给这个具体的id 加上x lock, 所以就无需等待insert intention
+    // lock
     if (lock_rec_get_insert_intention(lock2)) {
       /* No lock request needs to wait for an insert
       intention lock to be removed. This is ok since our
@@ -881,6 +896,17 @@ const lock_t *lock_rec_has_expl(
   ut_ad(!(precise_mode & LOCK_PREDICATE));
   ut_ad(!(precise_mode & LOCK_PRDT_PAGE));
 
+  // 获得当前这个page 的Lock
+  // 如果这个lock-> trx 是当前这个trx
+  // 并且lock mode 不是insert_intention
+  // 并且当前这个lock 有更高优先级的lock
+  // 并且这个Lock 不在wait 状态
+  // 如果这个lock 不包含gap, 那么这次申请的lock 的mode 也必须不包含gap
+  // 或者是supermum
+  // 如果这个lock 包含gap, 那么这次申请的Lock mode 也必须包含gap,
+  // 或者是supermum
+  // 总之: 已有的lock 和新申请的lock 是否包含gap 必须是一致的
+  // 如果符合上述情况, 就可以直接使用这个已有的lock
   for (lock = lock_rec_get_first(lock_sys->rec_hash, block, heap_no);
        lock != NULL; lock = lock_rec_get_next_const(heap_no, lock)) {
     if (lock->trx == trx && !lock_rec_get_insert_intention(lock) &&
@@ -965,6 +991,9 @@ static const lock_t *lock_rec_other_has_conflicting(
   // 这里对于这个record 上的所有record 进行遍历
   // 判断当前这个lock 和 这个page 上的其他Lock 是否有冲突
   auto lock = Lock_iter::for_each(rec_id, [=](const lock_t *lock) {
+    // 这里lock_rec_has_to_wait 是传进去给for_each 函数的
+    // 判断是否已这个record 上所有的lock 有冲突
+    // 如果有冲突就返回false
     if (lock_rec_has_to_wait(trx, mode, lock, is_supremum)) {
       return (false);
     }
@@ -1834,13 +1863,18 @@ lock_rec_req_status lock_rec_lock_fast(
   ut_ad(!(mode & LOCK_PRDT_PAGE));
   DBUG_EXECUTE_IF("innodb_report_deadlock", return (LOCK_REC_FAIL););
 
+  // 获得这个page 上面的record lock
   lock_t *lock = lock_rec_get_first_on_page(lock_sys->rec_hash, block);
 
+  // 获得这个thr 所对应的trx
   trx_t *trx = thr_get_trx(thr);
 
   lock_rec_req_status status = LOCK_REC_SUCCESS;
 
+  // 如果这个page 上没有lock
   if (lock == NULL) {
+    // 如果这个page 上没有lock, 并且要创建的不是implicit lock
+    // 是 explicit lock, 那么直接创建就可以
     if (!impl) {
       RecLock rec_lock(index, block, heap_no, mode);
 
@@ -1849,8 +1883,16 @@ lock_rec_req_status lock_rec_lock_fast(
 
     status = LOCK_REC_SUCCESS_CREATED;
   } else {
+    // 如果当前这个page 已经有lock
     trx_mutex_enter(trx);
 
+    // 以下几种场景不能走lock_fast 逻辑
+    // 1. 这个page 上面有多个record lock
+    // 2. 当前这个page 上的lock 的trx != 当前这个trx
+    // 3. 这个page 上的lock type != LOCK_REC
+    // 4. 这个page 上的lock heap_no 比当前这次要lock 的heap_no 小
+    // n_bits 表示的是这个lock lock住这个page record 个数
+    // n_bits < 当前trx heap_no  说明当前这个record 超过了这个lock 能管理的范围
     if (lock_rec_get_next_on_page(lock) != nullptr || lock->trx != trx ||
         lock->type_mode != (mode | LOCK_REC) ||
         lock_rec_get_n_bits(lock) <= heap_no) {
@@ -1862,6 +1904,7 @@ lock_rec_req_status lock_rec_lock_fast(
       if (!lock_rec_get_nth_bit(lock, heap_no)) {
         lock_rec_set_nth_bit(lock, heap_no);
         status = LOCK_REC_SUCCESS_CREATED;
+        // 更新lock age, 用于在判断dead lock 的时候设置权重
         lock_update_age(lock, heap_no);
       }
     }
@@ -1926,6 +1969,11 @@ static dberr_t lock_rec_lock_slow(ibool impl, select_mode sel_mode, ulint mode,
     err = DB_SUCCESS;
 
   } else {
+    // 检查是否和已有的Lock 有冲突
+    // 如果有冲突并且sle_mode 是ORDINARY, 那么就需要进入到add_to_waitq
+    // 里面等待这个Lock
+    //
+    // 在add_to_waitq 里面会进行死锁检查 deadlock_check()
     const lock_t *wait_for =
         lock_rec_other_has_conflicting(mode, block, heap_no, trx);
 
@@ -1952,6 +2000,7 @@ static dberr_t lock_rec_lock_slow(ibool impl, select_mode sel_mode, ulint mode,
       }
 
     } else if (!impl) {
+      // 如果这个lock 无需等待, 就申请成功这个lock
       /* Set the requested lock on the record, note that
       we already own the transaction mutex. */
 
@@ -7000,15 +7049,25 @@ const trx_t *DeadlockChecker::search() {
    * 这里是一个DFS, 但是是用一个stack 来去实现的DFS
    * 也就是DFS 找到一个节点, 就把这个节点放到stack 上, 这个stack 默认大小
    * 是4096 个元素
+   *
+   * 这里要注意的地方是 一个trx 等等的wait_lock 只会有一个, 但是这个wait_lock
+   * 可能被多个地方持有, 比如你的wait_lock 可能是12 record 上的lock_X,
+   * 但是这个时候你需要遍历的确实12 record 上面所有的lock, 因为有可能12 record
+   * 上面的lock_S 被多个trx 持有的, 这个正常的, 那么就需要遍历lock_X
+   * 和所有lock_S trx 的可能, 所以这个时候新的x lock 其实适合所有拥有12 record
+   * 的s lock 都需要连一条边, 那么回溯的时候就是尝试了其中一个lock_S 后,
+   * 发现没有环, 那么再去尝试另外一个lock_S. 所以这里主要的get_next_lock
+   * 就是下一个用于lock_S 的lock
+   *
+   * 当然, 也有可能存在一个trx 拥有record 的 record not gap, 一个trx 用于record
+   * 的gap lock 这种场景, 也在get_next_lock 里面遍历
    */
   for (;;) {
     /* We should never visit the same sub-tree more than once. */
     ut_ad(lock == NULL || !is_visited(lock));
 
-    // 这里判断这个stack 上有没有elems, 如果没有, 说明这个DFS 结束了
     while (m_n_elems > 0 && lock == NULL) {
       /* Restore previous search state. */
-
       pop(lock, heap_no);
 
       lock = get_next_lock(lock, heap_no);
@@ -7032,12 +7091,30 @@ const trx_t *DeadlockChecker::search() {
       lock = NULL;
 
     } else if (!lock_has_to_wait(m_wait_lock, lock)) {
+      // 这里死锁检测的过程是这样
+      // trx1 有一个想要加的lock, 那么这个lock 进入DeadlockChecker 的时候就变成
+      // wait_lock
+      // 那么怎么判断这个wait_lock 是否能够获得呢? 
+      // 如果这个wait_lock 和目前所有的lock 都没有冲突,
+      // 那么可以马上获得这个lock, 
+      // 如何判断是否有冲突? 
+      // 只需要判断在rec_hash 有没有和这个lock 同一space, page 的lock,
+      // 然后判断这个旧lock 和 wait_lock 是否有冲突, 如果有没有冲突,
+      // 那么就跳过了, 如果有冲突, 那么判断一下拥有旧lock 的trx 是否在wait 状态
+      // 如果在, 那么就到这个旧trx 上进行遍历 它正在等的lock
+      //
+      // 这里要进行遍历的地方在于, 判断在rec_hash 有没有和这个lock 同一space,
+      // page 的Lock 的时候, 可以存在多个, 那么对应的这个trx1
+      // 就和多个trx进行连边, 进而就需要遍历了.
+      //
+      // 典型的场景: 比如大家一开始都拥有一个record 的s lock, 然后这个时候trx1
+      // 进来, 要一个这个record 的x lock, 那么就需要遍历了
       /* No conflict, next lock */
       lock = get_next_lock(lock, heap_no);
 
     } else if (lock->trx == m_start) {
+      // 这个branch 是找到环的branch
       /* Found a cycle. */
-
       notify(lock);
 
       /* We don't expect deadlocks with most DD tables and all SDI tables.
@@ -7051,8 +7128,11 @@ const trx_t *DeadlockChecker::search() {
       /* Search too deep to continue. */
       m_too_deep = true;
       return (m_start);
-
     } else if (lock->trx_que_state() == TRX_QUE_LOCK_WAIT) {
+      // 这个branch 是常见的逻辑
+      // 也就是当前trx 等待的这个lock 所在的TRX1 也处在wait 状态
+      // 那么就需要看这个TRX1 等待的lock 是哪一个
+      // 因为这里lock.wait_lock 是有多个, 所以就变成一个图了
       /* Another trx ahead has requested a lock in an
       incompatible mode, and is itself waiting for a lock. */
 
@@ -7063,6 +7143,17 @@ const trx_t *DeadlockChecker::search() {
         return (m_start);
       }
 
+      // wait_lock 虽然只是一个Lock, 但是找这个wait lock 的时候
+      // 是判断所有和这个lock 冲突的lock
+      // 
+      // 一开始想的不对, 以为wait_lock 就是要获得这个wait_lock, 其实不是.
+      // wait_lock 是当前trx 想要获得的lock, 死锁检测做的就是如果这个trx 有了这个lock
+      // 是否会造成死锁. 
+      // 所以判断的过程wait_lock 需要和其他的trx 的lock 是否有冲突, 因为InnoDB
+      // 的lock 都set 在record, 因此只需要判断其他的trx 是否有这个record 的lock,
+      // 在判断这个record 的lock 是否有冲突即可
+      //
+     
       m_wait_lock = lock->trx->lock.wait_lock;
 
       lock = get_first_lock(&heap_no);

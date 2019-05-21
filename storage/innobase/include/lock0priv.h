@@ -1170,6 +1170,9 @@ struct Lock_iter {
 
     auto hash_table = lock_sys->rec_hash;
 
+    // 因为当前的record 可能包含多个record
+    // 比如对于一个record 可能加上了X,REC_NOT_GAP, 又有另外一个trx 加上了
+    // X,RECORD, 所以需要和这个record 对应的所有record 都进行比较
     auto list = hash_get_nth_cell(hash_table,
                                   hash_calc_hash(rec_id.m_fold, hash_table));
 
