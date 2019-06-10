@@ -545,6 +545,11 @@ lock_sys->mutex, trx->mutex or both. */
 struct trx_lock_t {
   ulint n_active_thrs; /*!< number of active query threads */
 
+  // 代表当前trx_state_active 以后更细的状态
+  // 1. trx 是正在running
+  // 2. trx 正在等待Lock
+  // 3. trx 正在rolling back
+  // 4. trx 正常committing
   trx_que_t que_state; /*!< valid when trx->state
                        == TRX_STATE_ACTIVE: TRX_QUE_RUNNING,
                        TRX_QUE_LOCK_WAIT, ... */
@@ -591,6 +596,11 @@ struct trx_lock_t {
   mem_heap_t *lock_heap; /*!< memory heap for trx_locks;
                          protected by lock_sys->mutex */
 
+
+  // 当前这个trx 拥有的所有的lock
+  // 所以是 trx_t => trx_lock_t => lock_t
+  // 也就是trx_lock_t 属于trx_t
+  // trx_lock_t 管理着这个trx_t 所有的 lock_t
   trx_lock_list_t trx_locks; /*!< locks requested by the transaction;
                              insertions are protected by trx->mutex
                              and lock_sys->mutex; removals are
@@ -1264,6 +1274,8 @@ class TrxInInnoDB {
   /**
   @return true if the rollback is being initiated by the thread that
           marked the transaction for asynchronous rollback */
+  // 所以判断是不是 async rollback 主要判断的就是这个trx 是否被当前这个os thread
+  // kill, 如果是被自己给kill 那么就是async rollback, 否则就不是
   static bool is_async_rollback(const trx_t *trx) {
     return (trx->killed_by == os_thread_get_curr_id());
   }
@@ -1273,6 +1285,8 @@ class TrxInInnoDB {
   @param[in]	trx	transaction
   @param[in]	disable	true if called from COMMIT/ROLLBACK method */
   static void enter(trx_t *trx, bool disable) {
+    // 如果是read_only, 那么直接return
+    // 说明read_only 模式下面是不走trx 的
     if (srv_read_only_mode) {
       return;
     }
@@ -1352,6 +1366,8 @@ class TrxInInnoDB {
   }
 
   /**
+  TODO(baotiao): 这里是刚进来到事务, 为什么要考虑rollback
+  是因为复用trx 么?
   Wait for the asynchronous rollback to complete, if it is in progress */
   static void wait(trx_t *trx) {
     ut_ad(trx_mutex_own(trx));

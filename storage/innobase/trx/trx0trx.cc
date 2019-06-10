@@ -912,6 +912,7 @@ static void trx_resurrect_update(
 /** Resurrect the transactions that were doing inserts and updates at
 the time of a crash, they need to be undone.
 @param[in]	rseg	rollback segment */
+// 分成在insert_undo_list 里面的trx 恢复和在update_undo_list 里面的trx 恢复
 static void trx_resurrect(trx_rseg_t *rseg) {
   trx_t *trx;
   trx_undo_t *undo;
@@ -970,6 +971,8 @@ void trx_lists_init_at_db_start(void) {
   // 比如undo_log01, undo_log02 等等
   // 所以两个space 都需要遍历一下
   // 通过trx_resurrect 恢复出当时的事务
+  // 
+  // 对于每一个rollback segment 都要进行trx 的恢复
   for (auto rseg : trx_sys->rsegs) {
     trx_resurrect(rseg);
   }
@@ -1191,6 +1194,7 @@ void trx_assign_rseg_temp(trx_t *trx) {
 }
 
 /** Starts a transaction. */
+// 开启一个事务的入口
 static void trx_start_low(
     trx_t *trx,      /*!< in: transaction */
     bool read_write) /*!< in: true if read-write transaction */
@@ -1244,6 +1248,7 @@ static void trx_start_low(
   /* The initial value for trx->no: TRX_ID_MAX is used in
   read_view_open_now: */
 
+  // 初始化的时候, 暂时把 trx->no 设置成无限大
   trx->no = TRX_ID_MAX;
 
   ut_a(ib_vector_is_empty(trx->autoinc_locks));
@@ -1267,6 +1272,7 @@ static void trx_start_low(
   read only can write to temporary tables, we put those on the RO
   list too. */
 
+  // 如果不是read_only 的 trx, 就是rw trx
   if (!trx->read_only &&
       (trx->mysql_thd == 0 || read_write || trx->ddl_operation)) {
     trx_assign_rseg_durable(trx);
@@ -1280,6 +1286,9 @@ static void trx_start_low(
 
     trx_sys->rw_trx_ids.push_back(trx->id);
 
+    // 将当前trx 加入到 rw_trx_set 里面
+    // rw_trx_set 保存的是 trxid 和 trx 对应关系
+    // 这样就可以根据trxid 找到trx
     trx_sys_rw_trx_add(trx);
 
     ut_ad(trx->rsegs.m_redo.rseg != 0 || srv_read_only_mode ||
@@ -1301,6 +1310,7 @@ static void trx_start_low(
     trx_sys_mutex_exit();
 
   } else {
+    // 如果是read_only trx, 那么就直接把 id 设置成0
     trx->id = 0;
 
     if (!trx_is_autocommit_non_locking(trx)) {
@@ -1371,9 +1381,11 @@ static bool trx_serialisation_number_get(
 
   trx_sys_mutex_enter();
 
+  // 这里可以看出, 在将要commit 的时候才会对trx->no 进行赋值
   trx->no = trx_sys_get_new_trx_id();
 
   /* Track the minimum serialisation number. */
+  // 将当前trx 加入到 serialisation_list 中
   if (!trx->read_only) {
     UT_LIST_ADD_LAST(trx_sys->serialisation_list, trx);
     added_trx_no = true;
@@ -1387,6 +1399,7 @@ static bool trx_serialisation_number_get(
   produce events when a rollback segment is empty. */
   if ((redo_rseg != NULL && redo_rseg->last_page_no == FIL_NULL) ||
       (temp_rseg != NULL && temp_rseg->last_page_no == FIL_NULL)) {
+    // 后续会把 TrxUndoRsegs 放入到purge queue 中
     TrxUndoRsegs elem(trx->no);
 
     if (redo_rseg != NULL && redo_rseg->last_page_no == FIL_NULL) {
@@ -1452,6 +1465,7 @@ static bool trx_write_serialisation_history(
   }
 
   /* If transaction involves insert then truncate undo logs. */
+  // TODO:(baotiao) 这里把对应的undo 给删除了, 为什么这里就可以删除了
   if (trx->rsegs.m_redo.insert_undo != NULL) {
     trx_undo_set_state_at_finish(trx->rsegs.m_redo.insert_undo, mtr);
   }
@@ -1496,6 +1510,7 @@ static bool trx_write_serialisation_history(
       with same trx-no as single unit. */
       bool update_rseg_len = !(trx->rsegs.m_noredo.update_undo != NULL);
 
+      // undo log cleanup 时机为什么是在这个时候
       trx_undo_update_cleanup(trx, &trx->rsegs.m_redo, undo_hdr_page,
                               update_rseg_len, (update_rseg_len ? 1 : 0), mtr);
     }
@@ -1827,6 +1842,7 @@ written */
     trx->state = TRX_STATE_NOT_STARTED;
 
   } else {
+    // 到这里已经开始release lock 了
     trx_release_impl_and_expl_locks(trx, serialised);
 
     /* Remove the transaction from the list of active
@@ -2016,9 +2032,7 @@ void trx_commit_low(
     number and a bigger commit lsn than T1. */
 
     /*--------------*/
-    // TODO(baotiao): 这里为什么需要先执行一下mtr_commit()
-    // 这里做的事情其实就是把mtr 内存里面的内容拷贝到redo log 的buffer pool 里面
-    // 但是这里并不会触发去唤醒log_writer 线程
+    // 这里在执行了mtr_commit 之后, 事务相关的内容在文件中的操作已经完成了
     mtr_commit(mtr);
 
     DBUG_EXECUTE_IF("ib_crash_during_trx_commit_in_mem",
@@ -2062,6 +2076,8 @@ void trx_commit(trx_t *trx) /*!< in/out: transaction */
 
     DBUG_EXECUTE_IF("ib_trx_commit_crash_rseg_updated", DBUG_SUICIDE(););
 
+    // 如果这个事务包含修改操作
+    // 初始化一个mtr
     mtr_start_sync(mtr);
 
   } else {

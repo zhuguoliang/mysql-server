@@ -100,7 +100,9 @@ enum trx_state_t {
   /** Support for 2PC/XA */
   TRX_STATE_PREPARED,
 
-  // TODO(baotiao): 是从 STATE_ACTIVE => IN_MEMORY, IN_MEMORY 之后又是什么
+  // 正常的trx_state 的过程是
+  // TRX_STATE_NOT_STARTED => 执行了trx_start_low 以后进入TRX_STATE_ACTIVE
+  // 因为默认都走XA 流程, 所以 下一步是TRX_STATE_PREPARED, 然后在执行了
   TRX_STATE_COMMITTED_IN_MEMORY
 };
 

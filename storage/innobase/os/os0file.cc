@@ -6391,7 +6391,7 @@ void os_aio_wait_until_no_pending_writes() {
 @param[in]	slot		slot in this array
 @return segment number (which is the number used by, for example,
         I/O-handler threads) */
-// 这里segment 是全局的
+// 这里返回的 segment 是全局的
 // s_ibuf array segment 是 IO_IBUF_SEGMENT 0
 // s_log array sgemtn 是 IO_LOG_SEGMENT 1
 // 然后 s_reads/s_writes 有多个segment, 每一个segment

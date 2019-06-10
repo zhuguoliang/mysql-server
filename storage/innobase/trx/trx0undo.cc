@@ -1209,6 +1209,8 @@ ulint trx_undo_lists_init(
   for (i = 0; i < TRX_RSEG_N_SLOTS; i++) {
     page_no_t page_no;
 
+    // 这里把这个rseg 对应所有slot 的 undo page 都读取出来, 判断里面是否有内容
+    // 如果有内容, 则就需要进行恢复出trx_undo_t 的内容
     page_no = trx_rsegf_get_nth_undo(rseg_header, i, &mtr);
 
     /* In forced recovery: try to avoid operations which look

@@ -5172,6 +5172,7 @@ static int innobase_commit(handlerton *hton, /*!< in: InnoDB handlerton */
       trx->flush_log_later = true;
     }
 
+    // 这里是innodb commit 主要逻辑
     innobase_commit_low(trx);
 
     if (!read_only) {
@@ -5310,6 +5311,8 @@ static int innobase_rollback_trx(trx_t *trx) /*!< in: transaction */
     lock_unlock_table_autoinc(trx);
   }
 
+  // 这个trx 包含的rollback 说明有做了修改才需要回滚
+  // 否则不需要回滚
   if (trx_is_rseg_updated(trx)) {
     error = trx_rollback_for_mysql(trx);
   } else {

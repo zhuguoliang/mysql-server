@@ -218,6 +218,8 @@ bool trx_is_temp_rseg_updated(const trx_t *trx) /*!< in: transaction */
 UNIV_INLINE
 bool trx_is_rseg_updated(const trx_t *trx) /*!< in: transaction */
 {
+  // 判断是否有insert/update 操作
+  // 那么只需要看这个事务里面的undo log 是否有内容即可
   return (trx_is_redo_rseg_updated(trx) || trx_is_temp_rseg_updated(trx));
 }
 

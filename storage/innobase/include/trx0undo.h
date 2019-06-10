@@ -318,6 +318,13 @@ void trx_undo_mem_free(trx_undo_t *undo); /* in: the undo object to be freed */
 #define TRX_UNDO_ACTIVE                                         \
   1                        /* contains an undo log of an active \
                            transaction */
+// 为什么会有cache 状态?
+// 因为undo log page 有可能在写入了一个trx 的undo 以后, 仍然是空闲的,
+// 那么这个时候如果直接让这个page 进行purge 操作, 就有点浪费. 因为purge
+// 需要清空这个page 同时又重新分配一个新的trx_undo_t 结构体
+// 因此为了性能考虑, 就重用trx_undo_t 又可以重用这个page
+// 把这个trx_undo_t 结构体就放入到update_undo_cached, 或者insert_undo_cached
+// 中了, 当后续有新事务需要申请rseg 的时候, 也会优先从cache 中获得
 #define TRX_UNDO_CACHED 2  /* cached for quick reuse */
 #define TRX_UNDO_TO_FREE 3 /* insert undo segment can be freed */
 #define TRX_UNDO_TO_PURGE                 \

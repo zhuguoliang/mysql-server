@@ -205,6 +205,8 @@ trx_rseg_t *trx_rseg_mem_create(ulint id, space_id_t space_id,
 
   /* Initialize the undo log lists according to the rseg header */
 
+  // 这一步会进行rseg 里面每一个slot 的读取, 确认每一个slot 里面有没有内容
+  // 有的话, 就恢复trx_undo_t 结构体
   sum_of_undo_sizes = trx_undo_lists_init(rseg);
 
   rseg->curr_size =
@@ -293,6 +295,7 @@ void trx_rsegs_init(purge_pq_t *purge_queue) {
   trx_rseg_t *rseg = nullptr;
 
   // TODO(baotiao): 这里为什么分成两次 trx_rseg_mem_create
+  // 对每一个rseg 都进行奔溃恢复过程
   for (slot = 0; slot < TRX_SYS_N_RSEGS; slot++) {
     mtr.start();
     trx_sysf_t *sys_header = trx_sysf_get(&mtr);
@@ -320,6 +323,7 @@ void trx_rsegs_init(purge_pq_t *purge_queue) {
   }
 
   undo::spaces->s_lock();
+
   // 这里为什么undo::spaces->m_spaces 有多个?
   // 因为默认的场景下面, rollback segment 是有128个
   // 然后rollback segment 0是保存在sys tablespace, 也就是tablespace_id = 0
