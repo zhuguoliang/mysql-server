@@ -993,6 +993,8 @@ struct trx_purge_t {
                          the transaction number and the undo
                          number of the record are stored in
                          purge_trx_no and purge_undo_no above */
+  // 下一个undo record 所在的rollback segment
+  // 如果没有undo record 要purge 的话, 这个rseg = NULL
   trx_rseg_t *rseg;      /*!< Rollback segment for the next undo
                          record to purge */
   page_no_t page_no;     /*!< Page number for the next undo

@@ -145,6 +145,10 @@ const page_size_t TrxUndoRsegsIterator::set_next() {
     return (univ_page_size);
   }
 
+  // rseg 保存着下一个要purge 的rollback seg 的位置
+  // 因为在上面已经对m_iter 进行过赋值了
+  // m_iter = m_trx_undo_rsegs.begin();
+  // 所以这里m_iter 等于这个rsegs 里面的第一个seg 位置
   m_purge_sys->rseg = *m_iter++;
 
   mutex_exit(&m_purge_sys->pq_mutex);
@@ -488,6 +492,7 @@ static void trx_purge_truncate_rseg_history(
   trx_id_t undo_trx_no;
   const bool is_temp = fsp_is_system_temporary(rseg->space_id);
 
+  // 这里对rollback segment history list 进行purge 操作的时候走的也是mtr
   mtr_start(&mtr);
 
   if (is_temp) {
@@ -1491,6 +1496,8 @@ static void trx_purge_truncate_history(
   would line up behind it.  So get the ddl_mutex before this s_lock(). */
   mutex_enter(&(undo::ddl_mutex));
   undo::spaces->s_lock();
+  // 在 trx_purge_truncate_rseg_history 中做具体的rollback segment 中的history
+  // list 的purge 过程
   for (auto undo_space : undo::spaces->m_spaces) {
     /* Purge rollback segments in this undo tablespace. */
     undo_space->rsegs()->s_lock();
@@ -1556,6 +1563,7 @@ static void trx_purge_truncate_history(
     ut_ad(purge_sys->undo_trunc.is_marked_space_empty());
 
     /* Truncate the marked space. */
+    // 这里是做具体的 undo tablespace truncate 过程
     if (!trx_purge_truncate_marked_undo()) {
       /* If the marked and empty space did not get trucated
       due to a concurrent clone or something else,
@@ -1743,8 +1751,19 @@ static void trx_purge_read_undo_rec(trx_purge_t *purge_sys,
 static void trx_purge_choose_next_log(void) {
   ut_ad(purge_sys->next_stored == FALSE);
 
+  // 获得下一个要purge 的undo record 位置
+  // 主要流程
+  // 1. 判断当前的m_trx_undo_rsegs 上是否还有元素需要purge, 如果有,
+  // 就先把这个rollback segment purge 干净
+  // 2. 判断purge_sys=>purge_queue 是否有元素
+  // 3. 有元素的话, 因为purge_queue 里面保存的是按照trx->no 排序好的TrxUndoRsegs
+  // 因为返回trx->no 最小的TrxUndoRsegs 赋值给m_trx_undo_rsegs 进行purge
+  // 4. 如果purge_sys=>purge_queue 没有元素, 把purge_sys->rseg 设置成NULL, sleep
+  // 5. 更新purge_sys 相关信息
   const page_size_t &page_size = purge_sys->rseg_iter->set_next();
 
+  // 上面这步只是获得了要purge 的rollback segment
+  // 但是还没有指向要purge 的 record
   if (purge_sys->rseg != NULL) {
     trx_purge_read_undo_rec(purge_sys, page_size);
   } else {
@@ -1970,6 +1989,7 @@ static ulint trx_purge_attach_undo_recs(const ulint n_purge_threads,
       table_id_t, purge_node_t::Recs *, std::less<table_id_t>,
       mem_heap_allocator<std::pair<const table_id_t, purge_node_t::Recs *>>>;
 
+  // group_by 是table_id_t => recs 的map
   GroupBy group_by{GroupBy::key_compare{},
                    mem_heap_allocator<GroupBy::value_type>{heap}};
 
@@ -1984,6 +2004,9 @@ static ulint trx_purge_attach_undo_recs(const ulint n_purge_threads,
     purge_node_t::rec_t rec;
 
     /* Fetch the next record, and advance the purge_sys->iter. */
+    // 这里fetch next record 有两种场景
+    // 1. 当前这个undo page 的下一个record
+    // 2. 如果这个undo page 已经满了, 就找到下一个undo page 的第一个record
     rec.undo_rec = trx_purge_fetch_next_rec(&rec.modifier_trx_id, &rec.roll_ptr,
                                             &n_pages_handled, heap);
 
@@ -2039,6 +2062,7 @@ static ulint trx_purge_attach_undo_recs(const ulint n_purge_threads,
 
       ut_a(que_node_get_type(node) == QUE_NODE_PURGE);
 
+      // 这里把一个个的rec 放入到 purge_node_t->child(node) 中
       if (node->recs == nullptr) {
         node->recs = it->second;
       } else {
@@ -2241,6 +2265,7 @@ ulint trx_purge(ulint n_purge_threads, /*!< in: number of purge tasks
   we rely on purge history length. So truncate the
   undo logs during upgrade to update purge history
   length. */
+  // 这一步将rollback 上面的history list 进行truncate 操作
   if (truncate || srv_upgrade_old_undo_found) {
     trx_purge_truncate();
   }

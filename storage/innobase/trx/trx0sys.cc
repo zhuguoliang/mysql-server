@@ -357,6 +357,7 @@ purge_pq_t *trx_sys_init_at_db_start(void) {
       ut_ad(trx->is_recovered);
       assert_trx_in_rw_list(trx);
 
+      // 如果状态是 TRX_STATE_ACTIVE 的事务, 就直接进行回滚了
       if (trx_state_eq(trx, TRX_STATE_ACTIVE)) {
         rows_to_undo += trx->undo_no;
       }

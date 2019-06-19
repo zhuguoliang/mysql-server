@@ -474,6 +474,9 @@ class Rsegs {
 
 /** Rollback segements from a given transaction with trx-no
 scheduled for purge. */
+// 一个trx 对应的多个undo rollback segment
+// TODO(baotiao): 为什么一个trx 要对应多个undo rollback segment
+// 我记得在事务开始阶段一旦设置了rollback segment 就一直从这个rseg 分配slot 了
 class TrxUndoRsegs {
  public:
   /** Default constructor */

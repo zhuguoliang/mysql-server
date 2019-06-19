@@ -2643,6 +2643,8 @@ static bool srv_task_execute(void) {
   ut_a(srv_force_recovery < SRV_FORCE_NO_BACKGROUND);
 
   mutex_enter(&srv_sys->tasks_mutex);
+  // 这里只有把 thr 取出来的过程是加锁的
+  // 具体操作thr 这个元素就不需要加lock 了
 
   if (UT_LIST_GET_LEN(srv_sys->tasks) > 0) {
     thr = UT_LIST_GET_FIRST(srv_sys->tasks);
@@ -2787,6 +2789,8 @@ static ulint srv_do_purge(
     ulint rseg_truncate_frequency = ut_min(
         static_cast<ulint>(srv_purge_rseg_truncate_frequency), undo_trunc_freq);
 
+    // 这里只是把 n_pages_purged 找出来, 然后summit 给purge queue, 具体的purge
+    // 工作还是在Purge thread 里面去做的
     n_pages_purged = trx_purge(n_use_threads, srv_purge_batch_size,
                                (++count % rseg_truncate_frequency) == 0);
 

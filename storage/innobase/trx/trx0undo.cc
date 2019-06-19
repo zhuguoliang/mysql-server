@@ -261,6 +261,10 @@ trx_undo_rec_t *trx_undo_get_next_rec(
   space_id_t space;
   trx_undo_rec_t *next_rec;
 
+  // 这里先从当前的 undo page 获得next record, 如果当前的undo page 的next record
+  // 已经都获得完了, 就从下一个undo page 去获得next record
+  //
+  // tips: 每一个undo record 都有指向下一个undo record 的指针
   next_rec = trx_undo_page_get_next_rec(rec, page_no, offset);
 
   if (next_rec) {
@@ -1015,6 +1019,7 @@ loop:
   undo_page = page_align(rec);
 
   last_rec = trx_undo_page_get_last_rec(undo_page, hdr_page_no, hdr_offset);
+  // 这里可以看到在truncate undo log 的也是也是走mtr 的
   if (trx_undo_rec_get_undo_no(last_rec) >= limit) {
     mtr_commit(&mtr);
 

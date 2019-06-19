@@ -346,23 +346,23 @@ struct log_t {
   uint64_t write_ahead_end_offset;
 #endif /* !UNIV_HOTBACKUP */
 
+
+	/*
+	 * 这几个值都只是在file rotate 的时候会变化, 
+   * current_file_lsn 永远指向的是开头的2k 的lsn, 
+   * current_file_real_offset 是相应的offset, 
+	 * current_file_end_offset 也是递增的, 表示的是当前所在的这个redo log 文件的end_offset
+	 * 用户在写入redo 数据的时候, 这几个值都不会发生变化, 只有在创建和recv 的时候会有变化
+	 */
   /** Some lsn value within the current log file. */
-  // 当前redolog 收到的最新的lsn
+  // current_file_lsn 永远指向的是当前redolog file开头的2k 的lsn位置
   lsn_t current_file_lsn;
 
   /** File offset for the current_file_lsn. */
-  // current_file_lsn 在当前具体的redolog 的文件的偏移位置
+  // 和上面current_file_lsn 相应的文件的偏移量
   uint64_t current_file_real_offset;
 
   /** Up to this file offset we are within the same current log file. */
-  /*
-   * log.current_file_end_offset = log.current_file_real_offset -
-   *   log.current_file_real_offset % log.file_size +
-   *   log.file_size;
-   * current_file_end_offset 就是current_file_real_offset 所在的redolog 文件
-   * 的文件的末尾信息
-   */
-
   uint64_t current_file_end_offset;
 
   /** Number of performed IO operations (only for printing stats). */
