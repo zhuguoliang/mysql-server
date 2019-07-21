@@ -2883,7 +2883,8 @@ dberr_t btr_cur_optimistic_insert(
                                            "WAIT_FOR btr_ins_resume "
                                            "NO_CLEAR_EVENT"))););
 
-      // 主要的往btree page 插入流程
+      // 主要的往btree page 插入流程, 这里前面btr_cur_ins_lock_and_undo
+      // 已经将对应的undo log 写入
       // 如果第一次写入失败, 会尝试第二次写入
       *rec = page_cur_tuple_insert(page_cursor, entry, index, offsets, heap,
                                    n_ext, mtr);

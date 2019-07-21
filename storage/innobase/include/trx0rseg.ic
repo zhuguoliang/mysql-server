@@ -123,6 +123,9 @@ ulint trx_rsegf_undo_find_free(
   }
 #endif
 
+  //TODO(baotiao): 这里可能可以优化, 因为每次都从0 开始, 可以简单的记录
+  //上一次的位置然后顺序往下找
+  //可能是因为undo slot 被reclaim 以后就完全无序了吧
   for (i = 0; i < max_slots; i++) {
     // 从rollback segment 里面的这个位置rsegf + TRX_RSEG_UNDO_SLOTS + n * TRX_RSEG_SLOT_SIZE
     // 读出这个TRX_RSEG_UNDO_SLOTS 里面保存的page num

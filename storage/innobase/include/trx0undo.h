@@ -362,13 +362,19 @@ struct trx_undo_t {
   ibool dict_operation; /*!< TRUE if a dict operation trx */
   trx_rseg_t *rseg;     /*!< rseg where the undo log belongs */
   /*-----------------------------*/
+  // 当前这个undo log space
   space_id_t space; /*!< space id where the undo log
                     placed */
   page_size_t page_size;
+  // 第一个undo log page 所在的page no
+  // 一个trx 可以会有多个undo log page, 所以经常把第一个undo log page 叫做
+  // header page
+  // header page 有undo log header 其他的page 没有
   page_no_t hdr_page_no;  /*!< page number of the header page in
                           the undo log */
   ulint hdr_offset;       /*!< header offset of the undo log on
                           the page */
+  // 上面说的一个trx 可能有多个undo log page, 这里指向了最后一个undo log page
   page_no_t last_page_no; /*!< page number of the last page in the
                           undo log; this may differ from
                           top_page_no during a rollback */

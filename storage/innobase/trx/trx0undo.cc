@@ -415,6 +415,7 @@ static MY_ATTRIBUTE((warn_unused_result)) dberr_t trx_undo_seg_create(
   /*	fputs(type == TRX_UNDO_INSERT
   ? "Creating insert undo log segment\n"
   : "Creating update undo log segment\n", stderr); */
+
   // 从当前这个rollback segment 里面找找有没有空闲的slot
   // 从这里可以看出trx_undo_t 对应着唯一一个的
   // Undo Log Header Page
@@ -787,6 +788,7 @@ buf_block_t *trx_undo_add_page(
 
   ut_ad(rw_lock_get_x_lock_count(&new_block->lock) == 1);
   buf_block_dbg_add_level(new_block, SYNC_TRX_UNDO_PAGE);
+  // 添加一个Undo page 以后, 把undo_slot_t 的last_page_no 设置成这个新添加的page
   undo->last_page_no = new_block->page.id.page_no();
 
   new_page = buf_block_get_frame(new_block);
@@ -1360,6 +1362,10 @@ static MY_ATTRIBUTE((warn_unused_result)) dberr_t trx_undo_create(
 
   rseg->curr_size++;
 
+  // 这里返回的是这个事务之前被分配的 128 rollback segment 中的一个rollback
+  // segment header
+  // 分配rollback segment 是事务变成rw trx 的时候就定下来了
+  // 下面一步是从这个rollback segment 1024 个slot 找一个空闲的
   rseg_header =
       trx_rsegf_get(rseg->space_id, rseg->page_no, rseg->page_size, mtr);
 
@@ -1376,10 +1382,12 @@ static MY_ATTRIBUTE((warn_unused_result)) dberr_t trx_undo_create(
 
   page_no = page_get_page_no(undo_page);
 
+  // 这里会写入一条 MLOG_UNDO_HDR_CREATE 的mtr
   offset = trx_undo_header_create(undo_page, trx_id, mtr);
 
   trx_undo_header_add_space_for_xid(undo_page, undo_page + offset, mtr);
 
+  // 先建立好undo page, 然后再创建undo memory 中的状态信息
   *undo = trx_undo_mem_create(rseg, id, type, trx_id, xid, page_no, offset);
   if (*undo == NULL) {
     err = DB_OUT_OF_MEMORY;
@@ -1516,6 +1524,8 @@ dberr_t trx_undo_assign_undo(
                   err = DB_TOO_MANY_CONCURRENT_TRXS;
                   goto func_exit;);
 
+  // 先尝试从cached list 上去获得undo, 如果没有cached 的undo 了,
+  // 那么再申请新的undo slot, 并创建对应的undo page
   undo = trx_undo_reuse_cached(trx, rseg, type, trx->id, trx->xid, &mtr);
   if (undo == NULL) {
     err = trx_undo_create(trx, rseg, type, trx->id, trx->xid, &undo, &mtr);

@@ -2045,12 +2045,12 @@ void log_writer(log_t *log_ptr) {
     if (log.write_lsn.load() < ready_lsn) {
       log_writer_write_buffer(log, ready_lsn);
 
-      if (step % 1024 == 0) {
+      if (step % 128 == 0) {
         write_to_file_requests_monitor.update();
 
         log_writer_mutex_exit(log);
 
-        os_thread_sleep(0);
+        os_thread_sleep(1);
 
         log_writer_mutex_enter(log);
       }

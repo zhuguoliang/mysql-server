@@ -2221,6 +2221,9 @@ dberr_t trx_undo_report_row_operation(
     ut_ad(page_no == undo->last_page_no);
 
     /* We have to extend the undo log by one page */
+    // 到这里表示当前一个undo page 太小了, 因为对于这个undo slot
+    // 需要再增加一个undo page, 那么会把新增加的这个undo page 连接到之前undo
+    // seg page list 上
 
     ut_ad(++loop_count < 2);
 

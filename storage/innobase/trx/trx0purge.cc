@@ -1526,6 +1526,7 @@ static void trx_purge_truncate_history(
   }
   trx_sys->tmp_rsegs.s_unlock();
 
+  // 这里看到是先 undo purge 然后再 undo tablespace truncate
   /* UNDO tablespace truncate. We will try to truncate as much as we
   can (greedy approach). This will ensure when the server is idle we
   try and truncate all the UNDO tablespaces. */

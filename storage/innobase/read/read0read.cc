@@ -405,6 +405,7 @@ void ReadView::copy_trx_ids(const trx_ids_t &trx_ids) {
     ::memmove(p, &trx_ids[0], n);
   }
 
+  // 这里把m_up_limit_id 更新成 m_ids 里面最小的事务id
   m_up_limit_id = m_ids.front();
 
 #ifdef UNIV_DEBUG
@@ -430,6 +431,8 @@ void ReadView::prepare(trx_id_t id) {
 
   m_low_limit_no = m_low_limit_id = m_up_limit_id = trx_sys->max_trx_id;
 
+  // 在ReadView prepare 阶段, 就会吧trx_sys 当前的 rw_trx_ids 拷贝一份到本地
+  
   if (!trx_sys->rw_trx_ids.empty()) {
     copy_trx_ids(trx_sys->rw_trx_ids);
   } else {
@@ -441,6 +444,8 @@ void ReadView::prepare(trx_id_t id) {
   if (UT_LIST_GET_LEN(trx_sys->serialisation_list) > 0) {
     const trx_t *trx;
 
+    // 因为serialisation_list 新的trx 是插入到最后
+    // 因此first 就是最小的trx->no 的trx
     trx = UT_LIST_GET_FIRST(trx_sys->serialisation_list);
 
     if (trx->no < m_low_limit_no) {
@@ -549,8 +554,14 @@ void MVCC::view_open(ReadView *&view, trx_t *trx) {
   }
 
   if (view != NULL) {
+    
+    // prepare 的是会就是把trx_sys->ids 拷贝到view 里面
     view->prepare(trx->id);
 
+    // 这里在新创建view, 加入到m_views 之前, 都会在上面view->prepare 更新一下
+    // m_low_limit_no = serialisation_list 里面最小 trx->no
+    // 因为serialisation_list 是一直是按照trx->no 排序的, 因此m_low_limit_no
+    // 也就是按照 trx->no 排序, 因此m_views 也是按照m_low_limit_no 排序的
     UT_LIST_ADD_FIRST(m_views, view);
 
     ut_ad(!view->is_closed());
@@ -589,6 +600,10 @@ ReadView *MVCC::get_oldest_view() const {
 
   ut_ad(mutex_own(&trx_sys->mutex));
 
+  // TODO(baotiao): 为什么这里 get_oldest_view 的时候, 只需要获得m_views
+  // 里面的第一个非closed 的view 就可以了, 这个m_views 里面的插入顺序是?
+  //
+  // 在创建一个ReadView 的时候都是 ADD_FIRST, 所以这里GET_LAST 是最老的
   for (view = UT_LIST_GET_LAST(m_views); view != NULL;
        view = UT_LIST_GET_PREV(m_view_list, view)) {
     if (!view->is_closed()) {

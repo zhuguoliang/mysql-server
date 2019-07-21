@@ -584,6 +584,7 @@ ulint mtr_t::Command::prepare_write() {
     /* Flag the single log record as the
     only record in this mini-transaction. */
 
+    // 所以mtr log 的第一个字段是类型
     *m_impl->m_log.front()->begin() |= MLOG_SINGLE_REC_FLAG;
 
   } else {
@@ -591,6 +592,7 @@ ulint mtr_t::Command::prepare_write() {
     multiple log records, append MLOG_MULTI_REC_END
     at the end. */
 
+    // 如果是包含多个 mtr 的log record, 在末尾加上MLOG_MULTI_REC_END
     mlog_catenate_ulint(&m_impl->m_log, MLOG_MULTI_REC_END, MLOG_1BYTE);
     ++len;
   }
