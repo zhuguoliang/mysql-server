@@ -240,6 +240,9 @@ struct mtr_t {
 
   /** Return current size of the buffer.
   @return	savepoint */
+  // TODO(baotiao) 为什么get_savepoint 就是直接返回m_memo 的大小就可以了
+  // 我们知道m_memo 保存的是lock 相关的信息, 那么回退就直接回退到某一个lock
+  // 相关的信息就可以了么? 为什么不需要回滚m_log 信息呢
   ulint get_savepoint() const MY_ATTRIBUTE((warn_unused_result)) {
     ut_ad(is_active());
     ut_ad(m_impl.m_magic_n == MTR_MAGIC_N);

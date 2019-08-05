@@ -556,6 +556,8 @@ loop:
 
   } else {
     /* Remove the log hdr from the rseg history. */
+    // 这里可以看到purge 的时候先把一个undo slot 默认的undo log 先purge 掉,
+    // 然后再purge 前面的
 
     trx_purge_remove_log_hdr(rseg_hdr, log_hdr, &mtr);
 
@@ -1501,7 +1503,9 @@ static void trx_purge_truncate_history(
   for (auto undo_space : undo::spaces->m_spaces) {
     /* Purge rollback segments in this undo tablespace. */
     undo_space->rsegs()->s_lock();
+    // 一个undo space 里面会对应多个rollback segment
     for (auto rseg : *undo_space->rsegs()) {
+      // 执行turncate rollback segment history list 的过程
       trx_purge_truncate_rseg_history(rseg, limit);
     }
     undo_space->rsegs()->s_unlock();

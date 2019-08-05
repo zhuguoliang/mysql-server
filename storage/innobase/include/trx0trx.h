@@ -606,6 +606,7 @@ struct trx_lock_t {
                              and lock_sys->mutex; removals are
                              protected by lock_sys->mutex */
 
+  // 这个trx 包含的所有table lock
   lock_pool_t table_locks; /*!< All table locks requested by this
                            transaction, including AUTOINC locks */
 
@@ -678,6 +679,7 @@ and sometimes by trx->mutex.
 
 /** Represents an instance of rollback segment along with its state variables.*/
 struct trx_undo_ptr_t {
+  // 每一个trx 都有唯一的rollback segment 与它对应
   trx_rseg_t *rseg;        /*!< rollback segment assigned to the
                            transaction, or NULL if not assigned
                            yet */

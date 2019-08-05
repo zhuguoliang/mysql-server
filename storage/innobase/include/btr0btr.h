@@ -105,6 +105,9 @@ constexpr size_t BTR_DELETE = 8192;
 
 /** In the case of BTR_SEARCH_LEAF or BTR_MODIFY_LEAF, the caller is
 already holding an S latch on the index tree */
+// 这些标记一般和 btr_latch_mode 一起使用
+// 这里意思是如果latch_mode 是BTR_SEARCH_LEAF or BTR_MODIFY_LEAF, 并且有这个标记
+// 表示的是这个index btree 的 table lock S 调用者已经持有了
 constexpr size_t BTR_ALREADY_S_LATCHED = 16384;
 
 /** In the case of BTR_MODIFY_TREE, the caller specifies the intention

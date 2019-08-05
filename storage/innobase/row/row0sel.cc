@@ -4469,6 +4469,9 @@ dberr_t row_search_mvcc(byte *buf, page_cur_mode_t mode,
     goto func_exit;
   }
 
+  // 在对一个btree 进行 row_search_mvcc 的时候, 只有这里开始mtr
+  // 后续都是把这个mtr 往下传
+  // 说明整个btree search 的过程都是在一个 mtr里面的
   mtr_start(&mtr);
 
   /*-------------------------------------------------------------*/
@@ -4662,6 +4665,8 @@ dberr_t row_search_mvcc(byte *buf, page_cur_mode_t mode,
     prebuilt->sql_stat_start = FALSE;
   } else {
   wait_table_again:
+    // 在进行btr_cur_search_to_nth_level 之前的这里
+    // 就已经对这个table 的 index 加了LOCK_IS 或者 LOCK_IX
     err = lock_table(0, index->table,
                      prebuilt->select_lock_type == LOCK_S ? LOCK_IS : LOCK_IX,
                      thr);
@@ -4731,6 +4736,8 @@ dberr_t row_search_mvcc(byte *buf, page_cur_mode_t mode,
 
     pcur->m_trx_if_known = trx;
 
+    // 获得上面search 到的btr_pcur_t 里面的record
+    // 在初始化btr_pcur_t 的时候就会执行 btr_cur_search_to_nth_level
     rec = btr_pcur_get_rec(pcur);
 
     if (!moves_up && !page_rec_is_supremum(rec) && set_also_gap_locks &&
@@ -4738,10 +4745,12 @@ dberr_t row_search_mvcc(byte *buf, page_cur_mode_t mode,
         !dict_index_is_spatial(index)) {
       /* Try to place a gap lock on the next index record
       to prevent phantoms in ORDER BY ... DESC queries */
+      // 根据record 获得下一个元素
       const rec_t *next_rec = page_rec_get_next_const(rec);
 
       offsets =
           rec_get_offsets(next_rec, index, offsets, ULINT_UNDEFINED, &heap);
+      // 获得record 的下一个record 以后, 可能会放一个gap lock 在下一个元素上
       err = sel_set_rec_lock(pcur, next_rec, index, offsets,
                              prebuilt->select_mode, prebuilt->select_lock_type,
                              LOCK_GAP, thr, &mtr);

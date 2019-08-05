@@ -103,6 +103,8 @@ enum btr_op_t {
 
 /** Modification types for the B-tree operation. Note that the order of
 the enum values is important.*/
+// TODO(baotiao):
+// 知道了这个这个Intention 有什么用?
 enum btr_intention_t {
   BTR_INTENTION_DELETE,
   BTR_INTENTION_BOTH,
@@ -416,6 +418,9 @@ at the latch_mode.
 static btr_intention_t btr_cur_get_and_clear_intention(ulint *latch_mode) {
   btr_intention_t intention;
 
+  // 知道了在BTR_MODIFY_TREE 的时候是想要insert record 或者 delete record
+  // 有什么用?
+  // TODO(baotiao);
   switch (*latch_mode & (BTR_LATCH_FOR_INSERT | BTR_LATCH_FOR_DELETE)) {
     case BTR_LATCH_FOR_INSERT:
       intention = BTR_INTENTION_INSERT;
@@ -571,6 +576,15 @@ to the intention.
 @param[in]	lock_intention	lock intention for the tree operation
 @param[in]	rec		record (current node_ptr)
 @return	true if tree modification is needed */
+// 判断这次操作是否有影响btree 结构
+// 所以这里判断如实这次操作是delete, 
+// 并且这个记录是这个page 的第一个元素, 并且prev_page 非空,
+// 或者这个记录是这个page 的最后一个元素, 并且next_page 非空
+// 那么这个操作是要修改btree 结构的
+//
+// 如果这次操作是insert
+// 并且这个记录是这个page 的最后一个元素, 并且next page 非空
+// 那么这个操作是要修改btree 结构的
 static bool btr_cur_need_opposite_intention(const page_t *page,
                                             btr_intention_t lock_intention,
                                             const rec_t *rec) {
@@ -656,6 +670,8 @@ void btr_cur_search_to_nth_level(
   btr_intention_t lock_intention;
   bool modify_external;
   buf_block_t *tree_blocks[BTR_MAX_LEVELS];
+  // 在btree 往下遍历的时候, 每一个level 只会进入一次
+  // 因此0 就代表root savepoint, 1 代表下一层依次的
   ulint tree_savepoints[BTR_MAX_LEVELS];
   ulint n_blocks = 0;
   ulint n_releases = 0;
@@ -705,6 +721,9 @@ void btr_cur_search_to_nth_level(
   bool par_read_init = latch_mode & BTR_PARALLEL_READ_INIT;
 
   ut_ad(!s_latch_by_caller || srv_read_only_mode ||
+      // 这里要保证进入到btr_cur_search_to_nth_level 的时候,
+      // 至少已经获得了这个index tree 的S/SX LOCK
+      // 或者这个index btree的 table lock 已经被调用者获得了
         mtr_memo_contains_flagged(mtr, dict_index_get_lock(index),
                                   MTR_MEMO_S_LOCK | MTR_MEMO_SX_LOCK) ||
         (rw_lock_own(dict_index_get_lock(index), RW_LOCK_SX) && par_read_init));
@@ -819,8 +838,14 @@ void btr_cur_search_to_nth_level(
   /* Store the position of the tree latch we push to mtr so that we
   know how to release it when we have latched leaf node(s) */
 
+  // 这里savepoint 就是如何回溯的方法, 方法也很简单
+  // 因为mtr.m_impl.m_memo 是一个数组, 在接下来search 的过程这个数组是往上增长的
+  // 
   savepoint = mtr_set_savepoint(mtr);
 
+  // 这里是主要和5.6 之前没有引入sx lock 区别的地方
+  // 在5.6 里面如果是BTR_MODIFY_TREE 就直接给这个btree 上x 锁
+  // 并没有这里判断是x lock 还是sx lock 的过程
   switch (latch_mode) {
     case BTR_MODIFY_TREE:
       /* Most of delete-intended operations are purging.
@@ -881,6 +906,10 @@ void btr_cur_search_to_nth_level(
       }
   }
   // 确定根节点的latch 类型
+  // 下面的写法是用非递归实现遍历的写法, 不断跳到search_loop 进行循环的过程
+  // 每次进来都会执行 page_cur_search_with_match 去当前这个level 的page
+  // 里面进行查找, 然后获得下一个level 的page 继续查找
+  //
   root_leaf_rw_latch = btr_cur_latch_for_root_leaf(latch_mode);
 
   page_cursor = btr_cur_get_page_cur(cursor);
@@ -889,6 +918,7 @@ void btr_cur_search_to_nth_level(
   const page_size_t page_size(dict_table_page_size(index->table));
 
   /* Start with the root page. */
+  // 这个是root page
   page_id_t page_id(space, dict_index_get_page(index));
 
   if (root_leaf_rw_latch == RW_X_LATCH) {
@@ -926,6 +956,7 @@ void btr_cur_search_to_nth_level(
   }
 
   /* Loop and search until we arrive at the desired level */
+  // 这个是leaf node 需要的latch, 要latch 住前一个, 中间一个, 后一个 3个
   btr_latch_leaves_t latch_leaves = {{NULL, NULL, NULL}, {0, 0, 0}};
 
 // 这里是循环遍历btree 的地方, 如果没有search 到指定level, 那么会又jump 回到这里
@@ -937,7 +968,7 @@ search_loop:
   rw_latch = RW_NO_LATCH;
   rtree_parent_modified = false;
 
-  // 一级一级往下找, 
+  // 一级一级往下找, !=0 表示的是非叶子节点
   if (height != 0) {
     /* We are about to fetch the root or a non-leaf page. */
     if ((latch_mode != BTR_MODIFY_TREE || height == level) &&
@@ -968,6 +999,11 @@ search_loop:
 
 retry_page_get:
   ut_ad(n_blocks < BTR_MAX_LEVELS);
+  // 把当前遍历tree 的点记录下来, 这里n_blocks 是和btree 的高度绑定的,
+  // 代表的是当前表里到的高度, 从0 => 1 => 2 => 3 依次增长
+  // 因为btree 每一个level 都会只被遍历到一次
+  // 那么for (int i = 0; i < n_blocks; i++) tree_blocks[n_blocks] 
+  // 就可以把这次遍历的过程回放出来了
   tree_savepoints[n_blocks] = mtr_set_savepoint(mtr);
   // 第一次进来的时候, 根据root 节点的page_id, 获得对应的Page
   block = buf_page_get_gen(page_id, page_size, rw_latch, guess, fetch, file,
@@ -1153,6 +1189,8 @@ retry_page_get:
   // height == 0 说明已经找到Leaf 节点了
   if (height == 0) {
     if (rw_latch == RW_NO_LATCH) {
+      // 这里在lock 叶子节点的时候, 会同时latch 住3个节点
+      // 前一个节点, 当前节点, 后一个节点
       latch_leaves = btr_cur_latch_leaves(block, page_id, page_size, latch_mode,
                                           cursor, mtr);
     }
@@ -1167,11 +1205,14 @@ retry_page_get:
           /* Release the tree s-latch */
           /* NOTE: BTR_MODIFY_EXTERNAL
           needs to keep tree sx-latch */
+          // 把在savepoint 上的latch 释放掉
           mtr_release_s_latch_at_savepoint(mtr, savepoint,
                                            dict_index_get_lock(index));
         }
 
         /* release upper blocks */
+        // 找到leaf node 以后, 要把整条搜索路径上的block 都释放掉
+        // 包含对应的block
         if (retrying_for_search_prev) {
           for (; prev_n_releases < prev_n_blocks; prev_n_releases++) {
             mtr_release_block_at_savepoint(
@@ -1337,6 +1378,7 @@ retry_page_get:
     if (latch_mode == BTR_MODIFY_TREE &&
         btr_cur_need_opposite_intention(page, lock_intention, node_ptr)) {
     need_opposite_intention:
+      // TODO(baotiao): 这里为什么upper_rw_latch 必须是RW_X_LATCH?
       ut_ad(upper_rw_latch == RW_X_LATCH);
 
       if (n_releases > 0) {
@@ -1360,6 +1402,8 @@ retry_page_get:
       n_blocks = 0;
       n_releases = 0;
 
+      // 这里又重新将page_id 设置成index 的root page, height = ULINT_UNDEFINED
+      // 重新开始search 么?
       goto search_loop;
     }
 
@@ -1467,6 +1511,7 @@ retry_page_get:
     // 当前的修改page 操作, 如果需要改变btree 结构, 那么父节点的lock
     // 是不能放开的
     // 主要通过btr_cur_will_modify_tree 确定是否会修改树结构
+    // 进入到下面分支就是不会修改btree 结构
     /* If the page might cause modify_tree,
     we should not release the parent page's lock. */
     if (!detected_same_key_root && latch_mode == BTR_MODIFY_TREE &&
@@ -1477,6 +1522,9 @@ retry_page_get:
       ut_ad(n_releases <= n_blocks);
 
       /* we can release upper blocks */
+      // 这里看到, 只要不修改btree 结构, 那么就把上层的block 给释放掉
+      // root page 是不会释放的, root page 一直保留sx lock
+      // 把除了root 节点以后的中间branch lock 都 release
       for (; n_releases < n_blocks; n_releases++) {
         if (n_releases == 0) {
           /* we should not release root page
@@ -1490,6 +1538,9 @@ retry_page_get:
       }
     }
 
+    // 如果已经找到 level, 并且这次操作要修改btree 结构 
+    // 那么把之前的sx latch 升级成x latch
+    // 就是在这里做的
     if (height == level && latch_mode == BTR_MODIFY_TREE) {
       ut_ad(upper_rw_latch == RW_X_LATCH);
       /* we should sx-latch root page, if released already.
@@ -1665,6 +1716,7 @@ retry_page_get:
                                 MTR_MEMO_SX_LOCK));
         /* because has sx-latch of index,
         can release upper blocks. */
+        // 这里是可以看到往下走的时候 upper blocks 的lock 是要放开的
         for (; n_releases < n_blocks; n_releases++) {
           mtr_release_block_at_savepoint(mtr, tree_savepoints[n_releases],
                                          tree_blocks[n_releases]);
@@ -1677,6 +1729,7 @@ retry_page_get:
       cursor->up_match = up_match;
     }
   } else {
+    // 这个是 level = 0 的场景
     // search 以后的结果是保存在cursor 里面, 所以更新一下cursor 就行
     cursor->low_match = low_match;
     cursor->low_bytes = low_bytes;
@@ -1903,8 +1956,14 @@ void btr_cur_open_at_index_side_func(
   ulint upper_rw_latch, root_leaf_rw_latch;
   btr_intention_t lock_intention;
   buf_block_t *tree_blocks[BTR_MAX_LEVELS];
+  // 在btree 往下遍历的时候, 每一个level 只会进入一次
+  // 因此0 就代表root savepoint, 1 代表下一层依次的
   ulint tree_savepoints[BTR_MAX_LEVELS];
+  // n_blocks 表示这一次遍历访问过的block 数
   ulint n_blocks = 0;
+  // n_release 表示这一次遍历释放过的block 数
+  // 在往下遍历的时候, 是会将上层的block 释放的
+  // 所以[n_release, n_block) 表示的是还没有release的 block
   ulint n_releases = 0;
   mem_heap_t *heap = NULL;
   ulint offsets_[REC_OFFS_NORMAL_SIZE];
@@ -1999,6 +2058,11 @@ void btr_cur_open_at_index_side_func(
       rw_latch = RW_NO_LATCH;
     }
 
+    // 这个n_blocks 就直接等于这个mtr.m_impl.m_memo.size()
+    // 也就是这个mtr 里面保存了多少个lock, 这个savepoints 的坐标就到哪里了
+    // 不过有个问题, 这个mtr 往下走的时候, 有可能把老的lock 释放掉
+    // 这个时候就有可能重复了
+    // 但是这个n_blocks 是一直++ 上去的, 所以没影响
     tree_savepoints[n_blocks] = mtr_set_savepoint(mtr);
     block = buf_page_get_gen(page_id, page_size, rw_latch, NULL,
                              cursor->m_fetch_mode, file, line, mtr);
@@ -2024,9 +2088,11 @@ void btr_cur_open_at_index_side_func(
     ut_ad(fil_page_index_page_check(page));
     ut_ad(index->id == btr_page_get_index_id(page));
 
+    // height == ULINT_UNDEFINED 的时候表示的是root
+    // height = 0 表示的是leaf node
     if (height == ULINT_UNDEFINED) {
       /* We are in the root node */
-
+      // 这里重置root height
       height = btr_page_get_level(page, mtr);
       root_height = height;
       ut_a(height >= level);
@@ -2035,6 +2101,7 @@ void btr_cur_open_at_index_side_func(
       ut_ad(height == btr_page_get_level(page, mtr));
     }
 
+    // height == level 表示已经search 到想要到的level 了
     if (height == level) {
       if (srv_read_only_mode) {
         btr_cur_latch_leaves(block, page_id, page_size, latch_mode, cursor,
@@ -3018,8 +3085,7 @@ dberr_t btr_cur_pessimistic_insert(
   *big_rec = NULL;
 
   // 确保这个时候已经对整个btree 加了x 或者xs lock
-  // 或者这个btree 是系统自己的btree
-  // 经常会看到is_intrinsic() 这个判断
+  // 或者这个btree 是临时表
   ut_ad(mtr_memo_contains_flagged(
             mtr, dict_index_get_lock(btr_cur_get_index(cursor)),
             MTR_MEMO_X_LOCK | MTR_MEMO_SX_LOCK) ||

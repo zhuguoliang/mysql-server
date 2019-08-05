@@ -941,6 +941,10 @@ void trx_undo_truncate_end_func(
 
     trunc_here = NULL;
 
+    // 这里扫描可以看到是从后往前扫
+    // 找到最后一个page, 再找最后一个page 里面的最后一个record
+    // 然后往前一个record找, 找到第一个record >= limit 就退出了
+    // 到这个record 位置的后面都可以删除了
     last_page_no = undo->last_page_no;
 
     undo_page = trx_undo_page_get(page_id_t(undo->space, last_page_no),
@@ -972,6 +976,8 @@ void trx_undo_truncate_end_func(
   }
 
 function_exit:
+  // 这道truncate 的点后, 把undo_page_free 更新到要truncate 这个点位置
+  // 在这个点之后的都删除了
   if (trunc_here) {
     mlog_write_ulint(undo_page + TRX_UNDO_PAGE_HDR + TRX_UNDO_PAGE_FREE,
                      trunc_here - undo_page, MLOG_2BYTES, &mtr);
@@ -1008,6 +1014,8 @@ loop:
     mtr.set_log_mode(MTR_LOG_NO_REDO);
   }
 
+  // 找到这个rollback segment 的第一个undo log page
+  // 然后从这个undo log page 里面找到第一个record
   rec = trx_undo_get_first_rec(nullptr, rseg->space_id, rseg->page_size,
                                hdr_page_no, hdr_offset, RW_X_LATCH, &mtr);
   if (rec == NULL) {
@@ -1031,9 +1039,11 @@ loop:
   page_no = page_get_page_no(undo_page);
 
   if (page_no == hdr_page_no) {
+    // 这里走free header page
     trx_undo_empty_header_page(rseg->space_id, rseg->page_size, hdr_page_no,
                                hdr_offset, &mtr);
   } else {
+    // 这里走 free non-header page
     trx_undo_free_page(rseg, TRUE, rseg->space_id, hdr_page_no, page_no, &mtr);
   }
 

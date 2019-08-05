@@ -2395,6 +2395,7 @@ and return. don't execute actual insert. */
         !thr_get_trx(thr)->in_rollback);
   ut_ad(thr != NULL || !dup_chk_only);
 
+  // 在具体的一次insert 操作, 也是都放在一个mtr 里面
   mtr.start();
 
   if (index->table->is_temporary()) {
@@ -2418,6 +2419,8 @@ and return. don't execute actual insert. */
   /* Note that we use PAGE_CUR_LE as the search mode, because then
   the function will return in both low_match and up_match of the
   cursor sensible values */
+  // 在执行btr_pcur_open 的时候会调用 btr_cur_search_to_nth_level
+  // 把pcur 初始化在指定的位置
   btr_pcur_open(index, entry, PAGE_CUR_LE, mode, &pcur, &mtr);
   cursor = btr_pcur_get_btr_cur(&pcur);
   cursor->thr = thr;
@@ -2521,6 +2524,11 @@ and return. don't execute actual insert. */
                                               &offsets_heap, entry_heap, entry,
                                               thr, &mtr);
 
+    // 这里可以看到
+    // 如果正在执行online ddl 操作, 这个时候有一个record 要插入
+    // 那么是先记录在row log 里面, 最后通过执行
+    // row_log_table_apply_insert
+    // 对记录进行合并操作
     if (err == DB_SUCCESS && dict_index_is_online_ddl(index)) {
       row_log_table_insert(btr_cur_get_rec(cursor), entry, index, offsets);
     }

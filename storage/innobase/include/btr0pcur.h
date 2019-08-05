@@ -676,6 +676,9 @@ inline bool btr_pcur_t::set_random_position(dict_index_t *index,
   return (positioned);
 }
 
+// 在open_no_init 的时候会执行btr_cur_search_to_nth_level
+// 在btree 上search 的时候, 执行btr_cur_search_to_nth_level, 最后search
+// 到的位置用 btr_pcur_t 表示
 inline void btr_pcur_t::open_no_init(dict_index_t *index, const dtuple_t *tuple,
                                      page_cur_mode_t mode, ulint latch_mode,
                                      ulint has_search_latch, mtr_t *mtr,
