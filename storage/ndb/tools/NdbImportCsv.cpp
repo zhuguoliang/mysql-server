@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2018, Oracle and/or its affiliates. All rights reserved.
+   Copyright (c) 2018, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -1054,6 +1054,10 @@ NdbImportCsv::Eval::do_eval()
     }
     Row* row = rows_chunk.pop_front();
     eval_line(row, line);
+    if (line->m_reject)
+    {
+      m_util.free_row(row);
+    }
     // stop loading if error
     if (m_input.has_error())
     {
@@ -1825,7 +1829,7 @@ NdbImportCsv::Eval::eval_field(Row* row, Line* line, Field* field)
   case NdbDictionary::Column::Tinyint:
     {
       int err = 0;
-      char* endptr = 0;
+      const char* endptr = nullptr;
       int val = cs->cset->strntol(
                 cs, datac, length, 10, &endptr, &err);
       if (err != 0)
@@ -1862,7 +1866,7 @@ NdbImportCsv::Eval::eval_field(Row* row, Line* line, Field* field)
   case NdbDictionary::Column::Smallint:
     {
       int err = 0;
-      char* endptr = 0;
+      const char* endptr = nullptr;
       int val = cs->cset->strntol(
                 cs, datac, length, 10, &endptr, &err);
       if (err != 0)
@@ -1899,7 +1903,7 @@ NdbImportCsv::Eval::eval_field(Row* row, Line* line, Field* field)
   case NdbDictionary::Column::Mediumint:
     {
       int err = 0;
-      char* endptr = 0;
+      const char* endptr = nullptr;
       int val = cs->cset->strntol(
                 cs, datac, length, 10, &endptr, &err);
       if (err != 0)
@@ -1937,7 +1941,7 @@ NdbImportCsv::Eval::eval_field(Row* row, Line* line, Field* field)
   case NdbDictionary::Column::Int:
     {
       int err = 0;
-      char* endptr = 0;
+      const char* endptr = nullptr;
       int32 val = cs->cset->strntol(
                   cs, datac, length, 10, &endptr, &err);
       if (err != 0)
@@ -1962,7 +1966,7 @@ NdbImportCsv::Eval::eval_field(Row* row, Line* line, Field* field)
   case NdbDictionary::Column::Bigint:
     {
       int err = 0;
-      char* endptr = 0;
+      const char* endptr = nullptr;
       int64 val = cs->cset->strntoll(
                   cs, datac, length, 10, &endptr, &err);
       if (err != 0)
@@ -1987,7 +1991,7 @@ NdbImportCsv::Eval::eval_field(Row* row, Line* line, Field* field)
   case NdbDictionary::Column::Tinyunsigned:
     {
       int err = 0;
-      char* endptr = 0;
+      const char* endptr = nullptr;
       uint val = cs->cset->strntoul(
                  cs, datac, length, 10, &endptr, &err);
       if (err != 0)
@@ -2023,7 +2027,7 @@ NdbImportCsv::Eval::eval_field(Row* row, Line* line, Field* field)
   case NdbDictionary::Column::Smallunsigned:
     {
       int err = 0;
-      char* endptr = 0;
+      const char* endptr = nullptr;
       uint val = cs->cset->strntoul(
                  cs, datac, length, 10, &endptr, &err);
       if (err != 0)
@@ -2059,7 +2063,7 @@ NdbImportCsv::Eval::eval_field(Row* row, Line* line, Field* field)
   case NdbDictionary::Column::Mediumunsigned:
     {
       int err = 0;
-      char* endptr = 0;
+      const char* endptr = nullptr;
       uint val = cs->cset->strntoul(
                  cs, datac, length, 10, &endptr, &err);
       if (err != 0)
@@ -2096,7 +2100,7 @@ NdbImportCsv::Eval::eval_field(Row* row, Line* line, Field* field)
   case NdbDictionary::Column::Unsigned:
     {
       int err = 0;
-      char* endptr = 0;
+      const char* endptr = nullptr;
       uint32 val = cs->cset->strntoul(
                    cs, datac, length, 10, &endptr, &err);
       if (err != 0)
@@ -2121,7 +2125,7 @@ NdbImportCsv::Eval::eval_field(Row* row, Line* line, Field* field)
   case NdbDictionary::Column::Bigunsigned:
     {
       int err = 0;
-      char* endptr = 0;
+      const char* endptr = nullptr;
       uint64 val = cs->cset->strntoull(
                    cs, datac, length, 10, &endptr, &err);
       if (err != 0)
@@ -2190,7 +2194,7 @@ NdbImportCsv::Eval::eval_field(Row* row, Line* line, Field* field)
    */
   case NdbDictionary::Column::Float:
     {
-      char* endptr = 0;
+      uint data_length;
       double val = 0.0;
       bool use_os_strtod =
 #ifndef _WIN32
@@ -2201,7 +2205,9 @@ NdbImportCsv::Eval::eval_field(Row* row, Line* line, Field* field)
       if (use_os_strtod)
       {
         errno = 0;
+        char* endptr = nullptr;
         val = ::strtod(datac, &endptr);
+        data_length = endptr - datac;
         if (errno != 0)
         {
           m_util.set_error_data(
@@ -2214,8 +2220,10 @@ NdbImportCsv::Eval::eval_field(Row* row, Line* line, Field* field)
       else
       {
         int err = 0;
+        const char* endptr = nullptr;
         val = cs->cset->strntod(
               cs, datac, length, &endptr, &err);
+        data_length = endptr - datac;
         if (err != 0)
         {
           m_util.set_error_data(
@@ -2225,7 +2233,7 @@ NdbImportCsv::Eval::eval_field(Row* row, Line* line, Field* field)
           break;
         }
       }
-      if (uint(endptr - datac) != length)
+      if (data_length != length)
       {
         m_util.set_error_data(
           error, __LINE__, 0,
@@ -2257,7 +2265,7 @@ NdbImportCsv::Eval::eval_field(Row* row, Line* line, Field* field)
   case NdbDictionary::Column::Double:
     {
       int err = 0;
-      char* endptr = 0;
+      uint data_length;
       double val = 0.0;
       bool use_os_strtod =
 #ifndef _WIN32
@@ -2268,7 +2276,9 @@ NdbImportCsv::Eval::eval_field(Row* row, Line* line, Field* field)
       if (use_os_strtod)
       {
         errno = 0;
+        char *endptr = nullptr;
         val = ::strtod(datac, &endptr);
+        data_length = endptr - datac;
         if (errno != 0)
         {
           m_util.set_error_data(
@@ -2280,8 +2290,10 @@ NdbImportCsv::Eval::eval_field(Row* row, Line* line, Field* field)
       }
       else
       {
+        const char* endptr = nullptr;
         val = cs->cset->strntod(
               cs, datac, length, &endptr, &err);
+        data_length = endptr - datac;
         if (err != 0)
         {
           m_util.set_error_data(
@@ -2291,7 +2303,7 @@ NdbImportCsv::Eval::eval_field(Row* row, Line* line, Field* field)
           break;
         }
       }
-      if (uint(endptr - datac) != length)
+      if (data_length != length)
       {
         m_util.set_error_data(
           error, __LINE__, 0,

@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2015, 2018, Oracle and/or its affiliates. All rights reserved.
+  Copyright (c) 2015, 2019, Oracle and/or its affiliates. All rights reserved.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -55,6 +55,8 @@ using mysql_harness::Path;
 #define LOGGER_API
 #endif
 
+#define BUFSIZE 512
+
 using std::ofstream;
 using std::ostringstream;
 
@@ -89,10 +91,21 @@ std::string Handler::format(const Record &record) const {
 
   // We ignore the return value from snprintf, which means that the
   // output is truncated if the total length exceeds the buffer size.
-  char buffer[512];
-  snprintf(buffer, sizeof(buffer), "%-19s %s %s [%s] %s", time_buf,
-           record.domain.c_str(), level_str[static_cast<int>(record.level)],
-           ss.str().c_str(), record.message.c_str());
+  char buffer[BUFSIZE];
+  int len =
+      snprintf(buffer, sizeof(buffer), "%-19s %s %s [%s] %s", time_buf,
+               record.domain.c_str(), level_str[static_cast<int>(record.level)],
+               ss.str().c_str(), record.message.c_str());
+  if (len >= BUFSIZE) {
+    // Overflowed the stack allocated buffer, so allocate dynamically
+    std::string dynbuf;
+    dynbuf.resize(len + 1);
+    snprintf(&dynbuf.front(), dynbuf.size(), "%-19s %s %s [%s] %s", time_buf,
+             record.domain.c_str(), level_str[static_cast<int>(record.level)],
+             ss.str().c_str(), record.message.c_str());
+    dynbuf.resize(len);
+    return dynbuf;
+  }
 
   // Note: This copies the buffer into an std::string
   return buffer;
@@ -119,8 +132,45 @@ void StreamHandler::do_log(const Record &record) {
 // class FileHandler
 
 FileHandler::FileHandler(const Path &path, bool format_messages, LogLevel level)
-    : StreamHandler(fstream_, format_messages, level),
-      fstream_(path.str(), ofstream::app) {
+    : StreamHandler(fstream_, format_messages, level), file_path_(path) {
+  // create a directory if it does not exist
+  {
+    std::string log_path(path.str());  // log_path = /path/to/file.log
+    size_t pos;
+    pos = log_path.find_last_of('/');
+    if (pos != std::string::npos) log_path.erase(pos);  // log_path = /path/to
+
+    // mkdir if it doesn't exist
+    if (mysql_harness::Path(log_path).exists() == false &&
+        mkdir(log_path, kStrictDirectoryPerm) != 0) {
+      auto last_error =
+#ifdef _WIN32
+          GetLastError()
+#else
+          errno
+#endif
+          ;
+      throw std::system_error(last_error, std::system_category(),
+                              "Error when creating dir '" + log_path +
+                                  "': " + std::to_string(last_error));
+    }
+  }
+
+  reopen();  // not opened yet so it's just for open in this context
+}
+
+void FileHandler::reopen() {
+  // here we need to lock the mutex that's used while logging
+  // to prevent other threads from trying to log to invalid stream
+  std::lock_guard<std::mutex> lock(stream_mutex_);
+
+  // if was open before, close first
+  if (fstream_.is_open()) {
+    fstream_.close();
+    fstream_.clear();
+  }
+
+  fstream_.open(file_path_.str(), ofstream::app);
   if (fstream_.fail()) {
     // get the last-error early as with VS2015 it has been seen
     // that something in std::system_error() called SetLastError(0)
@@ -132,16 +182,24 @@ FileHandler::FileHandler(const Path &path, bool format_messages, LogLevel level)
 #endif
         ;
 
-    if (path.exists()) {
+    if (file_path_.exists()) {
       throw std::system_error(
           last_error, std::system_category(),
-          "File exists, but cannot open for writing " + path.str());
+          "File exists, but cannot open for writing " + file_path_.str());
     } else {
       throw std::system_error(
           last_error, std::system_category(),
-          "Cannot create file in directory " + path.dirname().str());
+          "Cannot create file in directory " + file_path_.dirname().str());
     }
   }
+}  // namespace logging
+
+void FileHandler::do_log(const Record &record) {
+  std::lock_guard<std::mutex> lock(stream_mutex_);
+  stream_ << format(record) << std::endl;
+  // something is wrong with the logging file, let's at least log it on the
+  // std error as a fallback
+  if (stream_.fail()) std::cerr << format(record) << std::endl;
 }
 
 // satisfy ODR

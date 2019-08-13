@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2018, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 1995, 2019, Oracle and/or its affiliates. All Rights Reserved.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
@@ -354,14 +354,17 @@ class Fil_path {
   static char *SEPARATOR;
   static char *DOT_SLASH;
   static char *DOT_DOT_SLASH;
+  static char *SLASH_DOT_DOT_SLASH;
 #else
   static constexpr auto SEPARATOR = "\\/";
 #ifdef _WIN32
   static constexpr auto DOT_SLASH = ".\\";
   static constexpr auto DOT_DOT_SLASH = "..\\";
+  static constexpr auto SLASH_DOT_DOT_SLASH = "\\..\\";
 #else
   static constexpr auto DOT_SLASH = "./";
   static constexpr auto DOT_DOT_SLASH = "../";
+  static constexpr auto SLASH_DOT_DOT_SLASH = "/../";
 #endif /* _WIN32 */
 
 #endif /* __SUNPRO_CC */
@@ -472,6 +475,11 @@ class Fil_path {
   @return true if the path is valid. */
   bool is_valid() const MY_ATTRIBUTE((warn_unused_result));
 
+  /** Determine if m_path contains a circular section like "/anydir/../"
+  Fil_path::normalize() must be run before this.
+  @return true if a circular section if found, false if not */
+  bool is_circular() const MY_ATTRIBUTE((warn_unused_result));
+
   /** Remove quotes e.g., 'a;b' or "a;b" -> a;b.
   Assumes matching quotes.
   @return pathspec with the quotes stripped */
@@ -567,7 +575,7 @@ class Fil_path {
             std::equal(prefix.begin(), prefix.end(), path.begin()));
   }
 
-  /** Normalizes a directory path for the current OS:
+  /** Normalize a directory path for the current OS:
   On Windows, we convert '/' to '\', else we convert '\' to '/'.
   @param[in,out]	path	Directory and file path */
   static void normalize(std::string &path) {
@@ -578,7 +586,7 @@ class Fil_path {
     }
   }
 
-  /** Normalizes a directory path for the current OS:
+  /** Normalize a directory path for the current OS:
   On Windows, we convert '/' to '\', else we convert '\' to '/'.
   @param[in,out]	path	A NUL terminated path */
   static void normalize(char *path) {
@@ -1010,7 +1018,7 @@ Error messages are issued to the server log.
 @return pointer to created tablespace, to be filled in with fil_node_create()
 @retval nullptr on failure (such as when the same tablespace exists) */
 fil_space_t *fil_space_create(const char *name, space_id_t space_id,
-                              ulint flags, fil_type_t purpose)
+                              uint32_t flags, fil_type_t purpose)
     MY_ATTRIBUTE((warn_unused_result));
 
 /** Assigns a new space id for a new single-table tablespace.
@@ -1041,14 +1049,14 @@ page_no_t fil_space_get_size(space_id_t space_id)
 in the memory cache.
 @param[in]	space_id	Tablespace ID for which to get the flags
 @return flags, ULINT_UNDEFINED if space not found */
-ulint fil_space_get_flags(space_id_t space_id)
+uint32_t fil_space_get_flags(space_id_t space_id)
     MY_ATTRIBUTE((warn_unused_result));
 
 /** Sets the flags of the tablespace. The tablespace must be locked
 in MDL_EXCLUSIVE MODE.
 @param[in]	space		tablespace in-memory struct
 @param[in]	flags		tablespace flags */
-void fil_space_set_flags(fil_space_t *space, ulint flags);
+void fil_space_set_flags(fil_space_t *space, uint32_t flags);
 
 /** Open each file of a tablespace if not already open.
 @param[in]	space_id	Tablespace ID
@@ -1124,6 +1132,13 @@ system tablespace.
 dberr_t fil_write_flushed_lsn(lsn_t lsn) MY_ATTRIBUTE((warn_unused_result));
 
 #else /* !UNIV_HOTBACKUP */
+/** Frees a space object from the tablespace memory cache.
+Closes a tablespaces' files but does not delete them.
+There must not be any pending i/o's or flushes on the files.
+@param[in]	space_id	Tablespace ID
+@return true if success */
+bool meb_fil_space_free(space_id_t space_id);
+
 /** Extends all tablespaces to the size stored in the space header. During the
 mysqlbackup --apply-log phase we extended the spaces on-demand so that log
 records could be applied, but that may have left spaces still too small
@@ -1223,9 +1238,9 @@ The tablespace must exist in the memory cache.
 @param[in]	new_name	New tablespace name in the schema/name format
 @param[in]	new_path_in	New file name, or nullptr if it is located in
                                 The normal data directory
-@return true if success */
-bool fil_rename_tablespace(space_id_t space_id, const char *old_path,
-                           const char *new_name, const char *new_path_in)
+@return InnoDB error code */
+dberr_t fil_rename_tablespace(space_id_t space_id, const char *old_path,
+                              const char *new_name, const char *new_path_in)
     MY_ATTRIBUTE((warn_unused_result));
 
 /** Create a tablespace file.
@@ -1239,7 +1254,7 @@ bool fil_rename_tablespace(space_id_t space_id, const char *old_path,
                                 must be >= FIL_IBD_FILE_INITIAL_SIZE
 @return DB_SUCCESS or error code */
 dberr_t fil_ibd_create(space_id_t space_id, const char *name, const char *path,
-                       ulint flags, page_no_t size)
+                       uint32_t flags, page_no_t size)
     MY_ATTRIBUTE((warn_unused_result));
 
 /** Create a session temporary tablespace (IBT) file.
@@ -1251,7 +1266,7 @@ dberr_t fil_ibd_create(space_id_t space_id, const char *name, const char *path,
                                 must be >= FIL_IBT_FILE_INITIAL_SIZE
 @return DB_SUCCESS or error code */
 dberr_t fil_ibt_create(space_id_t space_id, const char *name, const char *path,
-                       ulint flags, page_no_t size)
+                       uint32_t flags, page_no_t size)
     MY_ATTRIBUTE((warn_unused_result));
 
 /** Deletes an IBD tablespace, either general or single-table.
@@ -1291,7 +1306,7 @@ from it
                                 by upgrade
 @return DB_SUCCESS or error code */
 dberr_t fil_ibd_open(bool validate, fil_type_t purpose, space_id_t space_id,
-                     ulint flags, const char *space_name,
+                     uint32_t flags, const char *space_name,
                      const char *table_name, const char *path_in, bool strict,
                      bool old_space) MY_ATTRIBUTE((warn_unused_result));
 
@@ -1775,13 +1790,6 @@ already be known.
 @param[in]	space_id	Tablespace ID to lookup
 @return true if open was successful */
 bool fil_tablespace_open_for_recovery(space_id_t space_id)
-    MY_ATTRIBUTE((warn_unused_result));
-
-/** Callback to check tablespace size with space header size and extend
-Caller must own the Fil_shard mutex that the file belongs to.
-@param[in]	file	file node
-@return	error code */
-dberr_t fil_check_extend_space(fil_node_t *file)
     MY_ATTRIBUTE((warn_unused_result));
 
 /** Replay a file rename operation for ddl replay.

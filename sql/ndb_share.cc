@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2011, 2018, Oracle and/or its affiliates. All rights reserved.
+   Copyright (c) 2011, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -29,7 +29,6 @@
 
 #include "m_string.h"
 #include "sql/ndb_conflict.h"
-#include "sql/ndb_dist_priv_util.h"
 #include "sql/ndb_event_data.h"
 #include "sql/ndb_log.h"
 #include "sql/ndb_name_util.h"
@@ -168,7 +167,7 @@ NDB_SHARE::create_key(const char *new_key)
   my_stpcpy(buf_ptr, table_name_buf);
   buf_ptr += table_name_len;
 
-  // Check that writing has not occured beyond end of allocated memory
+  // Check that writing has not occurred beyond end of allocated memory
   assert(buf_ptr < reinterpret_cast<char*>(allocated_key) + size);
 
   DBUG_PRINT("info", ("size: %lu", (unsigned long)size));
@@ -502,7 +501,8 @@ NDB_SHARE::debug_print(std::string& out, const char* line_separator) const
      << "  table_name: '" << table_name << "', " << line_separator
      << "  key: '" << key_string() << "', " << line_separator
      << "  use_count: " << use_count() << ", " << line_separator
-     << "  state: " << share_state_string() << ", " << line_separator;
+     << "  state: " << share_state_string() << ", " << line_separator
+     << "  op: " << op << ", " << line_separator;
 
 #ifndef DBUG_OFF
   std::string refs_string;
@@ -714,15 +714,6 @@ NDB_SHARE::deinitialize(void)
               share->key_string(), share->use_count(),
               share->share_state_string(),
               (uint)share->state);
-      /**
-     * For unknown reasons...the dist-priv tables linger here
-     * TODO investigate why
-     */
-      if (Ndb_dist_priv_util::is_distributed_priv_table(share->db,
-                                                        share->table_name))
-      {
-        save--;
-      }
 #endif
       NDB_SHARE::real_free_share(&share);
     }
@@ -860,6 +851,10 @@ NDB_SHARE::mark_share_dropped(NDB_SHARE** share_ptr)
       // Insert the share into the dropped tables list to keep track of
       // it until all handler references has been released
       ndbcluster_dropped_tables->emplace(share->key_string(), share);
+
+      std::string s;
+      share->debug_print(s, "\n");
+      std::cerr << "dropped_share: " << s << std::endl;
 
       // Share is referenced by 'ndbcluster_dropped_tables'
       share->refs_insert("ndbcluster_dropped_tables");

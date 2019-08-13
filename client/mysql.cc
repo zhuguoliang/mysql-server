@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2000, 2018, Oracle and/or its affiliates. All rights reserved.
+   Copyright (c) 2000, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -89,6 +89,8 @@
 
 #include "sql_common.h"
 
+#include "sql/net_ns.h"
+
 using std::max;
 using std::min;
 
@@ -170,11 +172,14 @@ static char *opt_bind_addr = NULL;
 static int connect_flag = CLIENT_INTERACTIVE;
 static bool opt_binary_mode = false;
 static bool opt_connect_expired_password = false;
-static char *current_host, *current_db,
-    *current_user = 0, *opt_password = 0, *current_prompt = 0,
-    *delimiter_str = 0,
-    *default_charset = (char *)MYSQL_AUTODETECT_CHARSET_NAME,
-    *opt_init_command = 0;
+static char *current_host;
+static char *current_db;
+static char *current_user = nullptr;
+static char *opt_password = nullptr;
+static char *current_prompt = nullptr;
+static char *delimiter_str = nullptr;
+static char *opt_init_command = nullptr;
+static const char *default_charset = MYSQL_AUTODETECT_CHARSET_NAME;
 static char *histfile;
 static char *histfile_tmp;
 static char *opt_histignore = NULL;
@@ -187,6 +192,9 @@ static STATUS status;
 static ulong select_limit, max_join_size, opt_connect_timeout = 0;
 static char mysql_charsets_dir[FN_REFLEN + 1];
 static char *opt_plugin_dir = 0, *opt_default_auth = 0;
+#ifdef HAVE_SETNS
+static char *opt_network_namespace = 0;
+#endif
 static const char *xmlmeta[] = {
     "&", "&amp;", "<", "&lt;", ">", "&gt;", "\"", "&quot;",
     /* Turn \0 into a space. Why not &#0;? That's not valid XML or HTML. */
@@ -297,7 +305,7 @@ static int com_nopager(String *str, char *), com_pager(String *str, char *),
 #endif
 
 static int read_and_execute(bool interactive);
-static void init_connection_options(MYSQL *mysql);
+static bool init_connection_options(MYSQL *mysql);
 static int sql_connect(char *host, char *database, char *user, char *password,
                        uint silent);
 static const char *server_version_string(MYSQL *mysql);
@@ -1139,7 +1147,7 @@ static COMMANDS *find_command(char *name);
 static COMMANDS *find_command(char cmd_name);
 static bool add_line(String &buffer, char *line, size_t line_length,
                      char *in_string, bool *ml_comment, bool truncated);
-static void remove_cntrl(String &buffer);
+static void remove_cntrl(String *buffer);
 static void print_table_data(MYSQL_RES *result);
 static void print_table_data_html(MYSQL_RES *result);
 static void print_table_data_xml(MYSQL_RES *result);
@@ -1167,8 +1175,9 @@ inline bool is_delimiter_command(char *name, ulong len) {
     only name(first DELIMITER_NAME_LEN bytes) is checked.
   */
   return (len >= DELIMITER_NAME_LEN &&
-          !my_strnncoll(charset_info, (uchar *)name, DELIMITER_NAME_LEN,
-                        (uchar *)DELIMITER_NAME, DELIMITER_NAME_LEN));
+          !my_strnncoll(
+              charset_info, pointer_cast<uchar *>(name), DELIMITER_NAME_LEN,
+              pointer_cast<const uchar *>(DELIMITER_NAME), DELIMITER_NAME_LEN));
 }
 
 /**
@@ -1277,6 +1286,8 @@ int main(int argc, char *argv[]) {
   }
   my_getopt_use_args_separator = false;
 
+  get_current_os_user();
+  get_current_os_sudouser();
   if (get_options(argc, (char **)argv)) {
     my_end(0);
     return EXIT_FAILURE;
@@ -1324,10 +1335,10 @@ int main(int argc, char *argv[]) {
 
   put_info("Welcome to the MySQL monitor.  Commands end with ; or \\g.",
            INFO_INFO);
-  snprintf((char *)glob_buffer.ptr(), glob_buffer.alloced_length(),
+  snprintf(glob_buffer.ptr(), glob_buffer.alloced_length(),
            "Your MySQL connection id is %lu\nServer version: %s\n",
            mysql_thread_id(&mysql), server_version_string(&mysql));
-  put_info((char *)glob_buffer.ptr(), INFO_INFO);
+  put_info(glob_buffer.ptr(), INFO_INFO);
 
   put_info(ORACLE_WELCOME_COPYRIGHT_NOTICE("2000"), INFO_INFO);
 
@@ -1348,7 +1359,7 @@ int main(int argc, char *argv[]) {
 
 #ifdef HAVE_READLINE
     if (!quick) {
-      initialize_readline((char *)my_progname);
+      initialize_readline(const_cast<char *>(my_progname));
 
       /* read-history from file, default ~/.mysql_history*/
       if (getenv("MYSQL_HISTFILE"))
@@ -1399,7 +1410,7 @@ int main(int argc, char *argv[]) {
       !mysql_get_option(&mysql, MYSQL_OPT_SSL_MODE, &ssl_mode)) {
     if (protocol == MYSQL_PROTOCOL_SOCKET && ssl_mode >= SSL_MODE_REQUIRED)
       put_info(
-          "You are enforcing ssl conection via unix socket. Please consider\n"
+          "You are enforcing ssl connection via unix socket. Please consider\n"
           "switching ssl off as it does not make connection via unix socket\n"
           "any more secure.",
           INFO_INFO);
@@ -1528,14 +1539,27 @@ static void kill_query(const char *reason) {
   kill_mysql = mysql_init(kill_mysql);
   init_connection_options(kill_mysql);
 
+#ifdef HAVE_SETNS
+  if (opt_network_namespace && set_network_namespace(opt_network_namespace)) {
+    goto err;
+  }
+#endif
+
   if (!mysql_real_connect(kill_mysql, current_host, current_user, opt_password,
                           "", opt_mysql_port, opt_mysql_unix_port, 0)) {
+#ifdef HAVE_SETNS
+    if (opt_network_namespace) (void)restore_original_network_namespace();
+#endif
     tee_fprintf(stdout,
                 "%s -- Sorry, cannot connect to the server to kill "
                 "query, giving up ...\n",
                 reason);
     goto err;
   }
+
+#ifdef HAVE_SETNS
+  if (opt_network_namespace && restore_original_network_namespace()) goto err;
+#endif
 
   interrupted_query = true;
 
@@ -1552,7 +1576,11 @@ static void kill_query(const char *reason) {
   tee_fprintf(stdout, "%s -- query aborted\n", reason);
 
 err:
+#ifdef HAVE_SETNS
+  if (opt_network_namespace) (void)release_network_namespace_resources();
+#endif
   mysql_close(kill_mysql);
+
   return;
 }
 
@@ -1822,6 +1850,12 @@ static struct my_option my_long_options[] = {
      &opt_build_completion_hash, &opt_build_completion_hash, 0, GET_BOOL,
      NO_ARG, 0, 0, 0, 0, 0, 0},
 #endif
+#ifdef HAVE_SETNS
+    {"network-namespace", 0,
+     "Network namespace to use for connection via tcp with a server.",
+     &opt_network_namespace, &opt_network_namespace, 0, GET_STR, REQUIRED_ARG,
+     0, 0, 0, 0, 0, 0},
+#endif
     {0, 0, 0, 0, 0, 0, GET_NO_ARG, NO_ARG, 0, 0, 0, 0, 0, 0}};
 
 static void usage(int version) {
@@ -1910,8 +1944,6 @@ bool get_one_option(int optid,
         put_info(strerror(errno), INFO_ERROR, errno);
         return 1;
       }
-      get_current_os_user();
-      get_current_os_sudouser();
       opt_syslog = 1;
       break;
     case 'o':
@@ -1921,8 +1953,13 @@ bool get_one_option(int optid,
         one_database = skip_updates = 1;
       break;
     case 'p':
-      if (argument == disabled_my_option)
-        argument = (char *)"";  // Don't require password
+      if (argument == disabled_my_option) {
+        // Don't require password
+        static char empty_password[] = {'\0'};
+        DBUG_ASSERT(empty_password[0] ==
+                    '\0');  // Check that it has not been overwritten
+        argument = empty_password;
+      }
       if (argument) {
         char *start = argument;
         my_free(opt_password);
@@ -2104,16 +2141,16 @@ static int read_and_execute(bool interactive) {
       line_number++;
       if (!glob_buffer.length()) status.query_start_line = line_number;
     } else {
-      char *prompt =
-          (char *)(ml_comment ? "   /*> "
-                              : glob_buffer.is_empty()
-                                    ? construct_prompt()
-                                    : !in_string ? "    -> "
-                                                 : in_string == '\''
-                                                       ? "    '> "
-                                                       : (in_string == '`'
-                                                              ? "    `> "
-                                                              : "    \"> "));
+      const char *prompt =
+          (ml_comment
+               ? "   /*> "
+               : glob_buffer.is_empty()
+                     ? construct_prompt()
+                     : !in_string
+                           ? "    -> "
+                           : in_string == '\''
+                                 ? "    '> "
+                                 : (in_string == '`' ? "    `> " : "    \"> "));
       if (opt_outfile && glob_buffer.is_empty()) fflush(OUTFILE);
 
 #if defined(_WIN32)
@@ -2186,7 +2223,7 @@ static int read_and_execute(bool interactive) {
   /* if in batch mode, send last query even if it doesn't end with \g or go */
 
   if (!interactive && !status.exit_status) {
-    remove_cntrl(glob_buffer);
+    remove_cntrl(&glob_buffer);
     if (!glob_buffer.is_empty()) {
       status.exit_status = 1;
       if (com_go(&glob_buffer, line) <= 0) status.exit_status = 0;
@@ -2296,7 +2333,7 @@ static COMMANDS *find_command(char *name) {
     */
     for (uint i = 0; commands[i].func; i++) {
       if (!my_strnncoll(&my_charset_latin1, (uchar *)name, len,
-                        (uchar *)commands[i].name, len) &&
+                        pointer_cast<const uchar *>(commands[i].name), len) &&
           (commands[i].name[len] == '\0') &&
           (!end || commands[i].takes_params)) {
         index = i;
@@ -2537,9 +2574,9 @@ static bool add_line(String &buffer, char *line, size_t line_length,
   DBUG_RETURN(0);
 }
 
-  /*****************************************************************
-              Interface to Readline Completion
-  ******************************************************************/
+/*****************************************************************
+            Interface to Readline Completion
+******************************************************************/
 
 #ifdef HAVE_READLINE
 
@@ -2623,8 +2660,7 @@ static char **new_mysql_completion(const char *text,
 #if defined(USE_NEW_EDITLINE_INTERFACE)
     return rl_completion_matches(text, new_command_generator);
 #else
-    return completion_matches((char *)text,
-                              (CPFunction *)new_command_generator);
+    return completion_matches(text, new_command_generator);
 #endif
   else
     return (char **)0;
@@ -2719,7 +2755,7 @@ static void build_completion_hash(bool rehash, bool write_info) {
 
   /* hash this file's known subset of SQL commands */
   while (cmd->name) {
-    add_word(&ht, (char *)cmd->name);
+    add_word(&ht, cmd->name);
     cmd++;
   }
 
@@ -2762,8 +2798,7 @@ You can turn off this feature to get a quicker startup with -A\n\n");
     DBUG_VOID_RETURN;
   }
   mysql_data_seek(tables, 0);
-  if (!(field_names = (char ***)alloc_root(
-            &hash_mem_root,
+  if (!(field_names = (char ***)hash_mem_root.Alloc(
             sizeof(char **) * (uint)(mysql_num_rows(tables) + 1)))) {
     mysql_free_result(tables);
     DBUG_VOID_RETURN;
@@ -2773,8 +2808,8 @@ You can turn off this feature to get a quicker startup with -A\n\n");
     if ((fields =
              mysql_list_fields(&mysql, (const char *)table_row[0], NullS))) {
       num_fields = mysql_num_fields(fields);
-      if (!(field_names[i] = (char **)alloc_root(
-                &hash_mem_root, sizeof(char *) * (num_fields * 2 + 1)))) {
+      if (!(field_names[i] = (char **)hash_mem_root.Alloc(
+                sizeof(char *) * (num_fields * 2 + 1)))) {
         mysql_free_result(fields);
         break;
       }
@@ -2803,7 +2838,7 @@ You can turn off this feature to get a quicker startup with -A\n\n");
   DBUG_VOID_RETURN;
 }
 
-  /* for gnu readline */
+/* for gnu readline */
 
 #ifndef HAVE_INDEX
 extern "C" {
@@ -3121,7 +3156,7 @@ static int com_charset(String *buffer MY_ATTRIBUTE((unused)), char *line) {
   if (new_cs) {
     charset_info = new_cs;
     mysql_set_character_set(&mysql, charset_info->csname);
-    default_charset = (char *)charset_info->csname;
+    default_charset = charset_info->csname;
     put_info("Charset changed", INFO_INFO);
   } else
     put_info("Charset is not found", INFO_INFO);
@@ -3151,7 +3186,7 @@ static int com_go(String *buffer, char *line MY_ATTRIBUTE((unused))) {
 
   /* Remove garbage for nicer messages */
   buff[0] = 0;
-  remove_cntrl(*buffer);
+  remove_cntrl(buffer);
 
   if (buffer->is_empty()) {
     if (status.batch)  // Ignore empty quries
@@ -3266,7 +3301,7 @@ static int com_go(String *buffer, char *line MY_ATTRIBUTE((unused))) {
 
 end:
 
-  /* Show warnings if any or error occured */
+  /* Show warnings if any or error occurred */
   if (show_warnings == 1 && (warnings >= 1 || error)) print_warnings();
 
   if (!error && !status.batch &&
@@ -3467,7 +3502,8 @@ static void print_as_hex(FILE *output_file, const char *str, ulong len,
   const char *ptr = str, *end = ptr + len;
   ulong i;
   fprintf(output_file, "0x");
-  for (; ptr < end; ptr++) fprintf(output_file, "%02X", *((uchar *)ptr));
+  for (; ptr < end; ptr++)
+    fprintf(output_file, "%02X", *(pointer_cast<const uchar *>(ptr)));
   for (i = 2 * len + 2; i < total_bytes_to_send; i++)
     tee_putc((int)' ', output_file);
 }
@@ -3501,7 +3537,7 @@ static void print_table_data(MYSQL_RES *result) {
     separator.append('+');
   }
   separator.append('\0');  // End marker for \0
-  tee_puts((char *)separator.ptr(), PAGER);
+  tee_puts(separator.ptr(), PAGER);
   if (column_names) {
     mysql_field_seek(result, 0);
     (void)tee_fputs("|", PAGER);
@@ -3516,7 +3552,7 @@ static void print_table_data(MYSQL_RES *result) {
       num_flag[off] = IS_NUM(field->type);
     }
     (void)tee_fputs("\n", PAGER);
-    tee_puts((char *)separator.ptr(), PAGER);
+    tee_puts(separator.ptr(), PAGER);
   }
 
   while ((cur = mysql_fetch_row(result))) {
@@ -3573,7 +3609,7 @@ static void print_table_data(MYSQL_RES *result) {
     }
     (void)tee_fputs("\n", PAGER);
   }
-  tee_puts((char *)separator.ptr(), PAGER);
+  tee_puts(separator.ptr(), PAGER);
   my_safe_afree((bool *)num_flag, sz, MAX_ALLOCA_SIZE);
 }
 
@@ -3901,9 +3937,9 @@ static int com_notee(String *buffer MY_ATTRIBUTE((unused)),
   return 0;
 }
 
-  /*
-    Sorry, this command is not available in Windows.
-  */
+/*
+  Sorry, this command is not available in Windows.
+*/
 
 #ifdef USE_POPEN
 static int com_pager(String *buffer MY_ATTRIBUTE((unused)),
@@ -3951,9 +3987,9 @@ static int com_nopager(String *buffer MY_ATTRIBUTE((unused)),
 }
 #endif
 
-  /*
-    Sorry, you can't send the result to an editor in Win32
-  */
+/*
+  Sorry, you can't send the result to an editor in Win32
+*/
 
 #ifdef USE_POPEN
 static int com_edit(String *buffer, char *line MY_ATTRIBUTE((unused))) {
@@ -3962,7 +3998,7 @@ static int com_edit(String *buffer, char *line MY_ATTRIBUTE((unused))) {
   const char *editor;
 
   if ((fd = create_temp_file(filename, NullS, "sql", O_CREAT | O_WRONLY,
-                             MYF(MY_WME))) < 0)
+                             KEEP_FILE, MYF(MY_WME))) < 0)
     goto err;
   if (buffer->is_empty() && !old_buffer.is_empty())
     (void)my_write(fd, (uchar *)old_buffer.ptr(), old_buffer.length(),
@@ -3981,7 +4017,7 @@ static int com_edit(String *buffer, char *line MY_ATTRIBUTE((unused))) {
   if (!my_stat(filename, &stat_arg, MYF(MY_WME))) goto err;
   if ((fd = my_open(filename, O_RDONLY, MYF(MY_WME))) < 0) goto err;
   (void)buffer->alloc((uint)stat_arg.st_size);
-  if ((tmp = read(fd, (char *)buffer->ptr(), buffer->alloced_length())) >= 0L)
+  if ((tmp = read(fd, buffer->ptr(), buffer->alloced_length())) >= 0L)
     buffer->length((uint)tmp);
   else
     buffer->length(0);
@@ -4364,12 +4400,18 @@ static int sql_real_connect(char *host, char *database, char *user,
                             char *password, uint silent) {
   if (connected) {
     connected = 0;
+#ifdef HAVE_SETNS
+    if (opt_network_namespace) (void)release_network_namespace_resources();
+#endif
     mysql_close(&mysql);
   }
 
   mysql_init(&mysql);
-  init_connection_options(&mysql);
-
+  if (init_connection_options(&mysql)) {
+    (void)put_error(&mysql);
+    (void)fflush(stdout);
+    return ignore_errors ? -1 : 1;
+  }
 #ifdef _WIN32
   uint cnv_errors;
   String converted_database, converted_user;
@@ -4389,9 +4431,25 @@ static int sql_real_connect(char *host, char *database, char *user,
   }
 #endif
 
+#ifdef HAVE_SETNS
+  if (opt_network_namespace && set_network_namespace(opt_network_namespace)) {
+    if (!silent) {
+      char msgbuf[PATH_MAX];
+      snprintf(msgbuf, sizeof(msgbuf), "Network namespace error: %s",
+               strerror(errno));
+      put_info(msgbuf, INFO_ERROR);
+    }
+
+    return ignore_errors ? -1 : 1;  // Abort
+  }
+#endif
+
   if (!mysql_real_connect(&mysql, host, user, password, database,
                           opt_mysql_port, opt_mysql_unix_port,
                           connect_flag | CLIENT_MULTI_STATEMENTS)) {
+#ifdef HAVE_SETNS
+    if (opt_network_namespace) (void)restore_original_network_namespace();
+#endif
     if (mysql_errno(&mysql) == ER_MUST_CHANGE_PASSWORD_LOGIN) {
       tee_fprintf(stdout,
                   "Please use --connect-expired-password option or "
@@ -4406,6 +4464,19 @@ static int sql_real_connect(char *host, char *database, char *user,
     }
     return -1;  // Retryable
   }
+
+#ifdef HAVE_SETNS
+  if (opt_network_namespace && restore_original_network_namespace()) {
+    if (!silent) {
+      char msgbuf[PATH_MAX];
+      snprintf(msgbuf, sizeof(msgbuf), "Network namespace error: %s",
+               strerror(errno));
+      put_info(msgbuf, INFO_ERROR);
+    }
+
+    return ignore_errors ? -1 : 1;  // Abort
+  }
+#endif
 
 #ifdef _WIN32
   /* Convert --execute buffer from UTF8MB4 to connection character set */
@@ -4447,7 +4518,7 @@ static int sql_real_connect(char *host, char *database, char *user,
 }
 
 /* Initialize options for the given connection handle. */
-static void init_connection_options(MYSQL *mysql) {
+static bool init_connection_options(MYSQL *mysql) {
   bool handle_expired = (opt_connect_expired_password || !status.batch);
 
   if (opt_init_command)
@@ -4465,8 +4536,10 @@ static void init_connection_options(MYSQL *mysql) {
   if (using_opt_local_infile)
     mysql_options(mysql, MYSQL_OPT_LOCAL_INFILE, (char *)&opt_local_infile);
 
-  SSL_SET_OPTIONS(mysql);
-
+  if (SSL_SET_OPTIONS(mysql)) {
+    tee_fprintf(stdout, "%s", SSL_SET_OPTIONS_ERROR);
+    return 1;
+  }
   if (opt_protocol)
     mysql_options(mysql, MYSQL_OPT_PROTOCOL, (char *)&opt_protocol);
 
@@ -4502,8 +4575,16 @@ static void init_connection_options(MYSQL *mysql) {
 
   mysql_options(mysql, MYSQL_OPT_CONNECT_ATTR_RESET, 0);
   mysql_options4(mysql, MYSQL_OPT_CONNECT_ATTR_ADD, "program_name", "mysql");
+  if (current_os_user)
+    mysql_options4(mysql, MYSQL_OPT_CONNECT_ATTR_ADD, "os_user",
+                   current_os_user);
+  if (current_os_sudouser)
+    mysql_options4(mysql, MYSQL_OPT_CONNECT_ATTR_ADD, "os_sudouser",
+                   current_os_sudouser);
 
   mysql_options(mysql, MYSQL_OPT_CAN_HANDLE_EXPIRED_PASSWORDS, &handle_expired);
+
+  return 0;
 }
 
 static int sql_connect(char *host, char *database, char *user, char *password,
@@ -4543,7 +4624,7 @@ static int com_status(String *buffer MY_ATTRIBUTE((unused)),
   MYSQL_RES *result = NULL;
 
   if (mysql_real_query_for_lazy(
-          C_STRING_WITH_LEN("select DATABASE(), USER() limit 1")))
+          STRING_WITH_LEN("select DATABASE(), USER() limit 1")))
     return 0;
 
   tee_puts("--------------", stdout);
@@ -4584,7 +4665,7 @@ static int com_status(String *buffer MY_ATTRIBUTE((unused)),
     tee_fprintf(stdout, "Insert id:\t\t%s\n", llstr(id, buff));
 
   /* "limit 1" is protection against SQL_SELECT_LIMIT=0 */
-  if (mysql_real_query_for_lazy(C_STRING_WITH_LEN(
+  if (mysql_real_query_for_lazy(STRING_WITH_LEN(
           "select @@character_set_client, @@character_set_connection, "
           "@@character_set_server, @@character_set_database limit 1"))) {
     if (mysql_errno(&mysql) == CR_SERVER_GONE_ERROR) return 0;
@@ -4728,11 +4809,11 @@ static int put_error(MYSQL *con) {
                   mysql_sqlstate(con));
 }
 
-static void remove_cntrl(String &buffer) {
-  char *start, *end;
-  end = (start = (char *)buffer.ptr()) + buffer.length();
+static void remove_cntrl(String *buffer) {
+  const char *start = buffer->ptr();
+  const char *end = start + buffer->length();
   while (start < end && !my_isgraph(charset_info, end[-1])) end--;
-  buffer.length((uint)(end - start));
+  buffer->length((uint)(end - start));
 }
 
 /**

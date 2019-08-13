@@ -1,4 +1,4 @@
-# Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2012, 2019, Oracle and/or its affiliates. All rights reserved.
 # 
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
@@ -22,7 +22,6 @@
 
 INCLUDE(CheckCCompilerFlag)
 INCLUDE(CheckCXXCompilerFlag)
-INCLUDE(cmake/compiler_bugs.cmake)
 INCLUDE(cmake/floating_point.cmake)
 
 IF(SIZEOF_VOIDP EQUAL 4)
@@ -57,7 +56,7 @@ IF(UNIX)
     ENDIF()
   ENDIF()
   IF(CMAKE_COMPILER_IS_GNUCXX)
-    SET(COMMON_CXX_FLAGS               "-std=c++11 -fno-omit-frame-pointer")
+    SET(COMMON_CXX_FLAGS               "-std=c++14 -fno-omit-frame-pointer")
     # Disable inline optimizations for valgrind testing to avoid false positives
     IF(WITH_VALGRIND)
       STRING_PREPEND(COMMON_CXX_FLAGS  "-fno-inline ")
@@ -79,14 +78,14 @@ IF(UNIX)
     ENDIF()
   ENDIF()
   IF(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    SET(COMMON_CXX_FLAGS               "-std=c++11 -fno-omit-frame-pointer")
+    SET(COMMON_CXX_FLAGS               "-std=c++14 -fno-omit-frame-pointer")
     IF(NOT DISABLE_SHARED)
       STRING_PREPEND(COMMON_CXX_FLAGS  "-fPIC ")
     ENDIF()
   ENDIF()
 
   # Solaris flags
-  IF(CMAKE_SYSTEM_NAME MATCHES "SunOS")
+  IF(SOLARIS)
     # Link mysqld with mtmalloc on Solaris 10 and later
     SET(WITH_MYSQLD_LDFLAGS "-lmtmalloc" CACHE STRING "")
 
@@ -143,7 +142,7 @@ IF(UNIX)
       STRING_APPEND(COMMON_C_FLAGS " ${SUNPRO_C_WARNING_SUPPRESSION_FLAGS}")
 
 
-      SET(COMMON_CXX_FLAGS          "-std=c++11 ${SUNPRO_FLAGS}")
+      SET(COMMON_CXX_FLAGS          "-std=c++14 ${SUNPRO_FLAGS}")
 
       # Build list of C++ warning tags to suppress. Comment in/out as needed.
 
@@ -242,8 +241,11 @@ IF(UNIX)
       # Reduce size of debug binaries, by omitting function declarations.
       # Note that we cannot set "-xdebuginfo=no%decl" during feature tests.
       # We still may get linking errors for merge_large_tests-t with Studio 12.6
-      STRING_APPEND(CMAKE_C_FLAGS_DEBUG            " -xdebuginfo=no%decl")
-      STRING_APPEND(CMAKE_CXX_FLAGS_DEBUG          " -xdebuginfo=no%decl")
+      # -g0 is the same as -g, except that inlining is enabled.
+      # When building -DWITH_NDBCLUSTER=1 even more of the merge_xxx_tests
+      # fail to link, so we keep -g0 for Studio 12.6
+      STRING_APPEND(CMAKE_C_FLAGS_DEBUG            " -g0 -xdebuginfo=no%decl")
+      STRING_APPEND(CMAKE_CXX_FLAGS_DEBUG          " -g0 -xdebuginfo=no%decl")
       STRING_APPEND(CMAKE_C_FLAGS_RELWITHDEBINFO   " -xdebuginfo=no%decl")
       STRING_APPEND(CMAKE_CXX_FLAGS_RELWITHDEBINFO " -xdebuginfo=no%decl")
 
@@ -268,6 +270,3 @@ IF(UNIX)
   STRING_PREPEND(CMAKE_CXX_FLAGS_MINSIZEREL     "${SECTIONS_FLAG} ")
 
 ENDIF()
-
-STRING_APPEND(CMAKE_C_FLAGS   " ${COMMON_C_WORKAROUND_FLAGS}")
-STRING_APPEND(CMAKE_CXX_FLAGS " ${COMMON_CXX_WORKAROUND_FLAGS}")

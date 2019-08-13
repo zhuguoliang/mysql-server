@@ -1,4 +1,4 @@
-# Copyright (c) 2015, 2018, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2015, 2019, Oracle and/or its affiliates. All rights reserved.
 # 
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
@@ -21,8 +21,6 @@
 # Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
 INCLUDE_DIRECTORIES(.)
-
-INCLUDE(${MYSQL_CMAKE_SCRIPT_DIR}/compile_flags.cmake)
 
 SET(RE2_SOURCES
     util/arena.cc
@@ -74,24 +72,23 @@ IF(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     TARGET_COMPILE_OPTIONS(re2_lib PRIVATE "-Wno-class-memaccess")
   ENDIF()
 
-  MY_CHECK_CXX_COMPILER_FLAG("-Wtautological-undefined-compare"
-                             HAVE_TAUTOLOGICAL_UNDEFINED_COMPARE)
-  IF(HAVE_TAUTOLOGICAL_UNDEFINED_COMPARE)
-    TARGET_COMPILE_OPTIONS(re2_lib
-      PRIVATE "-Wno-tautological-undefined-compare")
+  MY_CHECK_CXX_COMPILER_WARNING("-Wtautological-undefined-compare"
+    HAS_WARN_FLAG)
+  IF(HAS_WARN_FLAG)
+    TARGET_COMPILE_OPTIONS(re2_lib PRIVATE "${HAS_WARN_FLAG}")
   ENDIF()
-  MY_CHECK_CXX_COMPILER_FLAG("-Wunused-local-typedefs" HAVE_UNUSED_TYPEDEFS)
-  IF(HAVE_UNUSED_TYPEDEFS)
-    TARGET_COMPILE_OPTIONS(re2_lib PRIVATE "-Wno-unused-local-typedefs")
+  MY_CHECK_CXX_COMPILER_WARNING("-Wunused-local-typedefs" HAS_WARN_FLAG)
+  IF(HAS_WARN_FLAG)
+    TARGET_COMPILE_OPTIONS(re2_lib PRIVATE "${HAS_WARN_FLAG}")
   ENDIF()
-  MY_CHECK_CXX_COMPILER_FLAG("-Wnonnull-compare" HAVE_NONNULL_COMPARE)
-  IF(HAVE_NONNULL_COMPARE)
-    TARGET_COMPILE_OPTIONS(re2_lib PRIVATE "-Wno-nonnull-compare")
+  MY_CHECK_CXX_COMPILER_WARNING("-Wnonnull-compare" HAS_WARN_FLAG)
+  IF(HAS_WARN_FLAG)
+    TARGET_COMPILE_OPTIONS(re2_lib PRIVATE "${HAS_WARN_FLAG}")
   ENDIF()
 
-  MY_CHECK_CXX_COMPILER_FLAG("-Wextra-semi" HAVE_EXTRA_SEMI)
-  IF(HAVE_EXTRA_SEMI)
-    TARGET_COMPILE_OPTIONS(re2_lib PRIVATE "-Wno-extra-semi")
+  MY_CHECK_CXX_COMPILER_WARNING("-Wextra-semi" HAS_WARN_FLAG)
+  IF(HAS_WARN_FLAG)
+    TARGET_COMPILE_OPTIONS(re2_lib PRIVATE "${HAS_WARN_FLAG}")
   ENDIF()
 ENDIF()
 

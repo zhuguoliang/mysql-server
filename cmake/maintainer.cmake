@@ -1,4 +1,4 @@
-# Copyright (c) 2010, 2018, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2010, 2019, Oracle and/or its affiliates. All rights reserved.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
@@ -28,9 +28,8 @@ MACRO(MY_ADD_C_WARNING_FLAG WARNING_FLAG)
 ENDMACRO()
 
 MACRO(MY_ADD_CXX_WARNING_FLAG WARNING_FLAG)
-  STRING(REPLACE "c++" "cpp" WARNING_VAR ${WARNING_FLAG})
-  MY_CHECK_CXX_COMPILER_FLAG("-${WARNING_FLAG}" HAVE_${WARNING_VAR})
-  IF(HAVE_${WARNING_VAR})
+  MY_CHECK_CXX_COMPILER_WARNING("-${WARNING_FLAG}" HAS_FLAG)
+  IF(HAS_FLAG)
     STRING_APPEND(MY_CXX_WARNING_FLAGS " -${WARNING_FLAG}")
   ENDIF()
 ENDMACRO()
@@ -53,12 +52,6 @@ SET(MY_C_WARNING_FLAGS "${MY_WARNING_FLAGS} -Wwrite-strings")
 
 # Common warning flags for G++ and Clang++
 SET(MY_CXX_WARNING_FLAGS "${MY_WARNING_FLAGS} -Woverloaded-virtual")
-
-# GCC bug #36750 (https://gcc.gnu.org/bugzilla/show_bug.cgi?id=36750)
-# Remove when we require GCC >= 5.1 everywhere.
-if(CMAKE_COMPILER_IS_GNUCXX)
-  MY_ADD_CXX_WARNING_FLAG("Wno-missing-field-initializers")
-ENDIF()
 
 # The default =3 given by -Wextra is a bit too strict for our code.
 IF(CMAKE_COMPILER_IS_GNUCXX)

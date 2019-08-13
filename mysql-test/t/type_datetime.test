@@ -59,34 +59,10 @@ select * from t1 ignore index (dt) where dt > 20021020;
 drop table t1;
 
 #
-# Test of datetime optimization
-#
-SET sql_mode = 'NO_ENGINE_SUBSTITUTION';
-CREATE TABLE `t1` (
-  `date` datetime NOT NULL default '0000-00-00 00:00:00',
-  `numfacture` int(6) unsigned NOT NULL default '0',
-  `expedition` datetime NOT NULL default '0000-00-00 00:00:00',
-  PRIMARY KEY  (`numfacture`),
-  KEY `date` (`date`),
-  KEY `expedition` (`expedition`)
-) ENGINE=MyISAM;
-
-INSERT INTO t1 (expedition) VALUES ('0001-00-00 00:00:00');
-SELECT * FROM t1 WHERE expedition='0001-00-00 00:00:00';
-INSERT INTO t1 (numfacture,expedition) VALUES ('1212','0001-00-00 00:00:00');
-SELECT * FROM t1 WHERE expedition='0001-00-00 00:00:00';
-EXPLAIN SELECT * FROM t1 WHERE expedition='0001-00-00 00:00:00';
-drop table t1;
-create table t1 (a datetime not null, b datetime not null);
-insert into t1 values (now(), now());
-insert into t1 values (now(), now());
-select * from t1 where a is null or b is null;
-drop table t1;
-
-#
 # Let us check if we properly treat wrong datetimes and produce proper
 # warnings (for both strings and numbers)
 #
+SET sql_mode = 'NO_ENGINE_SUBSTITUTION';
 create table t1 (t datetime);
 insert into t1 values (20030102030460),(20030102036301),(20030102240401),
                       (20030132030401),(20031302030401),(100001202030401);
@@ -460,6 +436,7 @@ SELECT CAST(CAST('2008-07-29T10:42:51.1234567' AS DateTime) AS DECIMAL(30,7));
 --echo # 
 CREATE TABLE t1 (dt1 DATETIME);
 INSERT IGNORE INTO t1 (dt1) VALUES ('0000-00-01 00:00:01');
+--error ER_WRONG_VALUE
 DELETE IGNORE  FROM t1 WHERE dt1 = '0000-00-01 00:00:01';
 --echo # Should be empty
 SELECT * FROM t1;
@@ -639,12 +616,10 @@ CREATE TABLE test.t(col_varchar_nokey VARCHAR(1) NOT NULL,
                     col_int_nokey INT NOT NULL,
                     col_datetime_key datetime not null,
                     key(col_datetime_key)) ENGINE= InnoDB;
-# --error ER_TRUNCATED_WRONG_VALUE
-# Reintroduce above check when prepare is done in strict mode for DELETE
+--error ER_TRUNCATED_WRONG_VALUE
 DELETE FROM test.t WHERE `col_int_nokey` > `col_int_nokey`
                          AND TIMESTAMP( '18:16:35.025453' ) IS  NULL;
-# --error ER_TRUNCATED_WRONG_VALUE
-# Reintroduce above check when prepare is done in strict mode for DELETE
+--error ER_TRUNCATED_WRONG_VALUE
 UPDATE test.t SET `col_varchar_nokey` = TIMESTAMP(`col_time_nokey`,'00:00:00')
   WHERE `col_int_nokey` > `col_int_nokey`
         AND TIMESTAMP('18:16:35.025453') IS  NULL;

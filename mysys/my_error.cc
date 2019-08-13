@@ -107,7 +107,7 @@ static struct my_err_head *my_errmsgs_list = &my_errmsgs_globerrs;
 */
 
 char *my_strerror(char *buf, size_t len, int nr) {
-  char *msg = NULL;
+  const char *msg = nullptr;
 
   buf[0] = '\0'; /* failsafe */
 
@@ -116,17 +116,17 @@ char *my_strerror(char *buf, size_t len, int nr) {
     by the principle of least surprise.
   */
   if ((nr >= HA_ERR_FIRST) && (nr <= HA_ERR_LAST))
-    msg = (char *)handler_error_messages[nr - HA_ERR_FIRST];
+    msg = handler_error_messages[nr - HA_ERR_FIRST];
 
   if (msg != NULL)
     strmake(buf, msg, len - 1);
   else {
-  /*
-    On Windows, do things the Windows way. On a system that supports both
-    the GNU and the XSI variant, use whichever was configured (GNU); if
-    this choice is not advertised, use the default (POSIX/XSI).  Testing
-    for __GNUC__ is not sufficient to determine whether this choice exists.
-  */
+    /*
+      On Windows, do things the Windows way. On a system that supports both
+      the GNU and the XSI variant, use whichever was configured (GNU); if
+      this choice is not advertised, use the default (POSIX/XSI).  Testing
+      for __GNUC__ is not sufficient to determine whether this choice exists.
+    */
 #if defined(_WIN32)
     strerror_s(buf, len, nr);
     if (thr_winerr() != 0) {

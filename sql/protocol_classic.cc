@@ -1,4 +1,4 @@
-/* Copyright (c) 2000, 2018, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2000, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -516,9 +516,10 @@ bool Protocol_classic::net_store_data(const uchar *from, size_t length,
       Thus conversion directly to "packet" is not worthy.
       Let's use "convert" as a temporary buffer.
     */
-    return (convert->copy((const char *)from, length, from_cs, to_cs,
-                          &dummy_errors) ||
-            net_store_data((const uchar *)convert->ptr(), convert->length()));
+    return (convert.copy(pointer_cast<const char *>(from), length, from_cs,
+                         to_cs, &dummy_errors) ||
+            net_store_data(pointer_cast<const uchar *>(convert.ptr()),
+                           convert.length()));
   }
 
   size_t packet_length = packet->length();
@@ -527,7 +528,7 @@ bool Protocol_classic::net_store_data(const uchar *from, size_t length,
   if (new_length > packet->alloced_length() && packet->mem_realloc(new_length))
     return 1;
 
-  char *length_pos = (char *)packet->ptr() + packet_length;
+  char *length_pos = packet->ptr() + packet_length;
   char *to = length_pos + 1;
 
   to += copy_and_convert(to, conv_length, to_cs, (const char *)from, length,
@@ -881,8 +882,8 @@ bool net_send_ok(THD *thd, uint server_status, uint statement_warn_count,
   if (protocol->has_client_capability(CLIENT_SESSION_TRACK)) {
     /* the info field */
     if (state_changed || (message && message[0]))
-      pos =
-          net_store_data(pos, (uchar *)message, message ? strlen(message) : 0);
+      pos = net_store_data(pos, pointer_cast<const uchar *>(message),
+                           message ? strlen(message) : 0);
     /* session state change information */
     if (unlikely(state_changed)) {
       store.set_charset(thd->variables.collation_database);
@@ -901,7 +902,8 @@ bool net_send_ok(THD *thd, uint server_status, uint statement_warn_count,
     }
   } else if (message && message[0]) {
     /* the info field, if there is a message to store */
-    pos = net_store_data(pos, (uchar *)message, strlen(message));
+    pos = net_store_data(pos, pointer_cast<const uchar *>(message),
+                         strlen(message));
   }
 
   /* OK packet length will be restricted to 16777215 bytes */
@@ -1185,8 +1187,9 @@ static bool net_send_error_packet(NET *net, uint sql_errno, const char *err,
   /* Converted error message is always null-terminated. */
   length = (uint)(strmake(pos, converted_err, MYSQL_ERRMSG_SIZE - 1) - buff);
 
-  DBUG_RETURN(net_write_command(net, (uchar)255, (uchar *)"", 0, (uchar *)buff,
-                                length));
+  DBUG_RETURN(net_write_command(net, uchar{255},
+                                pointer_cast<const uchar *>(""), 0,
+                                pointer_cast<uchar *>(buff), length));
 }
 
 /**
@@ -1246,7 +1249,6 @@ uchar *net_store_data(uchar *to, longlong from) {
 void Protocol_classic::init(THD *thd_arg) {
   m_thd = thd_arg;
   packet = &m_thd->packet;
-  convert = &m_thd->convert_buffer;
 #ifndef DBUG_OFF
   field_types = 0;
 #endif
@@ -1268,6 +1270,8 @@ bool Protocol_classic::send_ok(uint server_status, uint statement_warn_count,
   const bool retval =
       net_send_ok(m_thd, server_status, statement_warn_count, affected_rows,
                   last_insert_id, message, false);
+  // Reclaim some memory
+  convert.shrink(m_thd->variables.net_buffer_length);
   DBUG_RETURN(retval);
 }
 
@@ -1292,6 +1296,8 @@ bool Protocol_classic::send_eof(uint server_status, uint statement_warn_count) {
                          true);
   else
     retval = net_send_eof(m_thd, server_status, statement_warn_count);
+  // Reclaim some memory
+  convert.shrink(m_thd->variables.net_buffer_length);
   DBUG_RETURN(retval);
 }
 
@@ -1306,6 +1312,8 @@ bool Protocol_classic::send_error(uint sql_errno, const char *err_msg,
   DBUG_ENTER("Protocol_classic::send_error");
   const bool retval =
       net_send_error_packet(m_thd, sql_errno, err_msg, sql_state);
+  // Reclaim some memory
+  convert.shrink(m_thd->variables.net_buffer_length);
   DBUG_RETURN(retval);
 }
 
@@ -1349,6 +1357,8 @@ void Protocol_classic::set_max_packet_size(ulong max_packet_size) {
 NET *Protocol_classic::get_net() { return &m_thd->net; }
 
 Vio *Protocol_classic::get_vio() { return m_thd->net.vio; }
+
+const Vio *Protocol_classic::get_vio() const { return m_thd->net.vio; }
 
 void Protocol_classic::set_vio(Vio *vio) { m_thd->net.vio = vio; }
 
@@ -2836,14 +2846,17 @@ bool Protocol_classic::store_ps_status(ulong stmt_id, uint column_count,
 
 bool Protocol_classic::get_compression() { return m_thd->net.compress; }
 
-bool Protocol_classic::start_result_metadata(uint num_cols, uint flags,
+bool Protocol_classic::start_result_metadata(uint num_cols_arg, uint flags,
                                              const CHARSET_INFO *cs) {
   DBUG_ENTER("Protocol_classic::start_result_metadata");
-  DBUG_PRINT("info", ("num_cols %u, flags %u", num_cols, flags));
-  result_cs = (CHARSET_INFO *)cs;
+  DBUG_PRINT("info", ("num_cols %u, flags %u", num_cols_arg, flags));
+  uint num_cols = num_cols_arg;
+  result_cs = cs;
   send_metadata = true;
   field_count = num_cols;
   sending_flags = flags;
+
+  DBUG_EXECUTE_IF("send_large_column_count_in_metadata", num_cols = 50397184;);
   /*
     We don't send number of column for PS, as it's sent in a preceding packet.
   */
@@ -2859,6 +2872,8 @@ bool Protocol_classic::start_result_metadata(uint num_cols, uint flags,
 
     my_net_write(&m_thd->net, (uchar *)&tmp, (size_t)(pos - (uchar *)&tmp));
   }
+  DBUG_EXECUTE_IF("send_large_column_count_in_metadata",
+                  num_cols = num_cols_arg;);
 #ifndef DBUG_OFF
   /*
     field_types will be filled only if we send metadata.
@@ -3043,7 +3058,7 @@ bool Protocol_classic::send_field_metadata(Send_field *field,
       return true;
     }
     /* Store fixed length fields */
-    pos = (char *)packet->ptr() + packet->length();
+    pos = packet->ptr() + packet->length();
     *pos++ = 12;  // Length of packed fields
     /* inject a NULL to test the client */
     DBUG_EXECUTE_IF("poison_rs_fields", pos[-1] = (char)0xfb;);
@@ -3093,7 +3108,7 @@ bool Protocol_classic::send_field_metadata(Send_field *field,
       send_metadata = false;
       return true;
     }
-    pos = (char *)packet->ptr() + packet->length();
+    pos = packet->ptr() + packet->length();
     pos[0] = 3;
     int3store(pos + 1, field->length);
     pos[4] = 1;
@@ -3139,7 +3154,7 @@ bool store(Protocol *prot, I_List<i_string> *str_list) {
     tmp.append(',');
   }
   if ((len = tmp.length())) len--;  // Remove last ','
-  return prot->store((char *)tmp.ptr(), len, tmp.charset());
+  return prot->store(tmp.ptr(), len, tmp.charset());
 }
 
 /****************************************************************************
@@ -3150,7 +3165,9 @@ bool store(Protocol *prot, I_List<i_string> *str_list) {
   All data are sent as 'packed-string-length' followed by 'string-data'
 ****************************************************************************/
 
-bool Protocol_classic::connection_alive() { return m_thd->net.vio != NULL; }
+bool Protocol_classic::connection_alive() const {
+  return m_thd->net.vio != nullptr;
+}
 
 void Protocol_text::start_row() {
 #ifndef DBUG_OFF
@@ -3180,10 +3197,11 @@ bool Protocol_classic::store_string_aux(const char *from, size_t length,
   if (tocs && !my_charset_same(fromcs, tocs) && fromcs != &my_charset_bin &&
       tocs != &my_charset_bin) {
     /* Store with conversion */
-    return net_store_data((uchar *)from, length, fromcs, tocs);
+    return net_store_data(pointer_cast<const uchar *>(from), length, fromcs,
+                          tocs);
   }
   /* Store without conversion */
-  return net_store_data((uchar *)from, length);
+  return net_store_data(pointer_cast<const uchar *>(from), length);
 }
 
 int Protocol_classic::shutdown(bool) {
@@ -3312,7 +3330,7 @@ bool Protocol_text::store(MYSQL_TIME *tm, uint decimals) {
   field_pos++;
 #endif
   char buff[MAX_DATE_STRING_REP_LENGTH];
-  size_t length = my_datetime_to_str(tm, buff, decimals);
+  size_t length = my_datetime_to_str(*tm, buff, decimals);
   return net_store_data((uchar *)buff, length);
 }
 
@@ -3324,7 +3342,7 @@ bool Protocol_text::store_date(MYSQL_TIME *tm) {
   field_pos++;
 #endif
   char buff[MAX_DATE_STRING_REP_LENGTH];
-  size_t length = my_date_to_str(tm, buff);
+  size_t length = my_date_to_str(*tm, buff);
   return net_store_data((uchar *)buff, length);
 }
 
@@ -3336,7 +3354,7 @@ bool Protocol_text::store_time(MYSQL_TIME *tm, uint decimals) {
   field_pos++;
 #endif
   char buff[MAX_DATE_STRING_REP_LENGTH];
-  size_t length = my_time_to_str(tm, buff, decimals);
+  size_t length = my_time_to_str(*tm, buff, decimals);
   return net_store_data((uchar *)buff, length);
 }
 
@@ -3466,16 +3484,17 @@ bool Protocol_text::send_parameters(List<Item_param> *parameters, bool) {
     [..]..[[length]data]              data
 ****************************************************************************/
 bool Protocol_binary::start_result_metadata(uint num_cols, uint flags,
-                                            const CHARSET_INFO *result_cs) {
+                                            const CHARSET_INFO *result_cs_arg) {
   bit_fields = (num_cols + 9) / 8;
   packet->alloc(bit_fields + 1);
-  return Protocol_classic::start_result_metadata(num_cols, flags, result_cs);
+  return Protocol_classic::start_result_metadata(num_cols, flags,
+                                                 result_cs_arg);
 }
 
 void Protocol_binary::start_row() {
   if (send_metadata) return Protocol_text::start_row();
   packet->length(bit_fields + 1);
-  memset(const_cast<char *>(packet->ptr()), 0, 1 + bit_fields);
+  memset(packet->ptr(), 0, 1 + bit_fields);
   field_pos = 0;
 }
 
@@ -3502,7 +3521,7 @@ bool Protocol_binary::store_null() {
   if (send_metadata) return Protocol_text::store_null();
   uint offset = (field_pos + 2) / 8 + 1, bit = (1 << ((field_pos + 2) & 7));
   /* Room for this as it's allocated in prepare_for_send */
-  char *to = (char *)packet->ptr() + offset;
+  char *to = packet->ptr() + offset;
   *to = (char)((uchar)*to | (uchar)bit);
   field_pos++;
   return 0;
@@ -3717,44 +3736,54 @@ static ulong get_param_length(uchar *packet, ulong packet_left_len,
     *header_len = 0;
     return 0;
   }
-  if (*packet < 251) {
-    *header_len = 1;
-    return (ulong)*packet;
+
+  switch (*packet) {
+    case (252): {
+      if (packet_left_len < 3) {
+        *header_len = 0;
+        return 0;
+      }
+      *header_len = 3;
+      return static_cast<ulong>(uint2korr(packet + 1));
+    }
+
+    case (253): {
+      if (packet_left_len < 4) {
+        *header_len = 0;
+        return 0;
+      }
+      *header_len = 4;
+      return static_cast<ulong>(uint3korr(packet + 1));
+    }
+
+    case (254): {
+      /*
+       In our client-server protocol all numbers bigger than 2^24
+       stored as 8 bytes with uint8korr. Here we always know that
+       parameter length is less than 2^4 so we don't look at the second
+       4 bytes. But still we need to obey the protocol hence 9 in the
+       assignment below.
+      */
+      if (packet_left_len < 9) {
+        *header_len = 0;
+        return 0;
+      }
+      *header_len = 9;
+      return static_cast<ulong>(uint4korr(packet + 1));
+    }
+
+    // 0xff as the first byte of a length-encoded integer is undefined.
+    case (255): {
+      *header_len = 0;
+      return 0;
+    }
+
+    // (*packet < 251)
+    default: {
+      *header_len = 1;
+      return static_cast<ulong>(*packet);
+    }
   }
-  if (packet_left_len < 3) {
-    *header_len = 0;
-    return 0;
-  }
-  if (*packet == 252) {
-    *header_len = 3;
-    return (ulong)uint2korr(packet + 1);
-  }
-  if (packet_left_len < 4) {
-    *header_len = 0;
-    return 0;
-  }
-  if (*packet == 253) {
-    *header_len = 4;
-    return (ulong)uint3korr(packet + 1);
-  }
-  if (packet_left_len < 5) {
-    *header_len = 0;
-    return 0;
-  }
-  if (packet_left_len < 9) {
-    *header_len = 0;
-    return 0;
-  }
-  DBUG_ASSERT(*packet == 254);
-  *header_len = 9;
-  /*
-    In our client-server protocol all numbers bigger than 2^24
-    stored as 8 bytes with uint8korr. Here we always know that
-    parameter length is less than 2^4 so don't look at the second
-    4 bytes. But still we need to obey the protocol hence 9 in the
-    assignment above.
-  */
-  return (ulong)uint4korr(packet + 1);
 }
 
 /**

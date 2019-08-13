@@ -1,7 +1,7 @@
 #ifndef TABLE_INCLUDED
 #define TABLE_INCLUDED
 
-/* Copyright (c) 2000, 2018, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2000, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -27,7 +27,7 @@
 #include <sys/types.h>
 #include <string>
 
-#include "binary_log_types.h"
+#include "field_types.h"
 #include "lex_string.h"
 #include "m_ctype.h"
 #include "map_helpers.h"
@@ -96,6 +96,7 @@ class Temp_table_param;
 class handler;
 class partition_info;
 enum enum_stats_auto_recalc : int;
+enum Value_generator_source : short;
 enum row_type : int;
 struct HA_CREATE_INFO;
 struct LEX;
@@ -114,6 +115,14 @@ class View;
 enum class enum_table_type;
 }  // namespace dd
 class Common_table_expr;
+
+class Sql_table_check_constraint;
+using Sql_table_check_constraint_list =
+    Mem_root_array<Sql_table_check_constraint *>;
+
+class Sql_check_constraint_share;
+using Sql_check_constraint_share_list =
+    Mem_root_array<Sql_check_constraint_share *>;
 
 typedef Mem_root_array_YY<LEX_CSTRING> Create_col_name_list;
 
@@ -541,9 +550,9 @@ typedef enum enum_table_category TABLE_CATEGORY;
 extern ulong refresh_version;
 
 struct TABLE_FIELD_TYPE {
-  LEX_STRING name;
-  LEX_STRING type;
-  LEX_STRING cset;
+  LEX_CSTRING name;
+  LEX_CSTRING type;
+  LEX_CSTRING cset;
 };
 
 struct TABLE_FIELD_DEF {
@@ -644,7 +653,7 @@ struct TABLE_SHARE {
                      in a secondary storage engine
   */
   TABLE_SHARE(unsigned long version, bool secondary)
-      : m_version(version), m_secondary(secondary) {}
+      : m_version(version), m_secondary_engine(secondary) {}
 
   /*
     A map of [uint, Histogram] values, where the key is the field index. The
@@ -695,7 +704,7 @@ struct TABLE_SHARE {
   LEX_STRING encrypt_type{nullptr, 0}; /* encryption algorithm */
 
   /** Secondary storage engine. */
-  LEX_STRING secondary_engine{nullptr, 0};
+  LEX_CSTRING secondary_engine{nullptr, 0};
 
   const CHARSET_INFO *table_charset{
       nullptr}; /* Default charset of string fields */
@@ -711,9 +720,9 @@ struct TABLE_SHARE {
     should correspond to each other.
     To ensure this one can use set_table_cache() methods.
   */
-  LEX_STRING table_cache_key{nullptr, 0};
-  LEX_STRING db{nullptr, 0};              /* Pointer to db */
-  LEX_STRING table_name{nullptr, 0};      /* Table name (for open) */
+  LEX_CSTRING table_cache_key{nullptr, 0};
+  LEX_CSTRING db{nullptr, 0};             /* Pointer to db */
+  LEX_CSTRING table_name{nullptr, 0};     /* Table name (for open) */
   LEX_STRING path{nullptr, 0};            /* Path to .frm file (from datadir) */
   LEX_STRING normalized_path{nullptr, 0}; /* unpack_filename(path) */
   LEX_STRING connect_string{nullptr, 0};
@@ -931,6 +940,9 @@ struct TABLE_SHARE {
   uint foreign_key_parents{0};
   TABLE_SHARE_FOREIGN_KEY_PARENT_INFO *foreign_key_parent{nullptr};
 
+  // List of check constraint share instances.
+  Sql_check_constraint_share_list *check_constraint_share_list{nullptr};
+
   /**
     Set share's table cache key and update its db and table name appropriately.
 
@@ -1122,17 +1134,17 @@ struct TABLE_SHARE {
   }
 
   /// Does this TABLE_SHARE represent a table in a primary storage engine?
-  bool is_primary() const { return !m_secondary; }
+  bool is_primary_engine() const { return !m_secondary_engine; }
 
   /// Does this TABLE_SHARE represent a table in a secondary storage engine?
-  bool is_secondary() const { return m_secondary; }
+  bool is_secondary_engine() const { return m_secondary_engine; }
 
   /**
     Does this TABLE_SHARE represent a primary table that has a shadow
     copy in a secondary storage engine?
   */
-  bool has_secondary() const {
-    return is_primary() && secondary_engine.str != nullptr;
+  bool has_secondary_engine() const {
+    return is_primary_engine() && secondary_engine.str != nullptr;
   }
 
  private:
@@ -1147,7 +1159,7 @@ struct TABLE_SHARE {
   unsigned long m_version{0};
 
   /// Does this TABLE_SHARE represent a table in a secondary storage engine?
-  bool m_secondary{false};
+  bool m_secondary_engine{false};
 };
 
 /**
@@ -1181,7 +1193,7 @@ class Blob_mem_storage {
      @param length         string length
 
      @retval Pointer to the copied string.
-     @retval 0 if an error occured.
+     @retval 0 if an error occurred.
   */
   char *store(const char *from, size_t length) {
     return (char *)memdup_root(&storage, from, length);
@@ -1325,7 +1337,10 @@ struct TABLE {
     needed by the query without reading the row.
   */
   Key_map covering_keys;
-  Key_map quick_keys, merge_keys;
+  Key_map quick_keys;
+
+  /* Merge keys are all keys that had a column reffered to in the query */
+  Key_map merge_keys;
 
   /*
     possible_quick_keys is a superset of quick_keys to use with EXPLAIN of
@@ -1461,6 +1476,9 @@ struct TABLE {
   uint lock_count{0};      /* Number of locks */
   uint db_stat{0};         /* mode of file as in handler.h */
   int current_lock{0};     /* Type of lock on table */
+
+  // List of table check constraints.
+  Sql_table_check_constraint_list *table_check_constraint_list{nullptr};
 
  private:
   /**
@@ -1610,7 +1628,7 @@ struct TABLE {
   void clear_column_bitmaps(void);
   void prepare_for_position(void);
 
-  void mark_column_used(THD *thd, Field *field, enum enum_mark_columns mark);
+  void mark_column_used(Field *field, enum enum_mark_columns mark);
   void mark_columns_used_by_index_no_reset(uint index, MY_BITMAP *map,
                                            uint key_parts = 0);
   void mark_columns_used_by_index(uint index);
@@ -1620,8 +1638,8 @@ struct TABLE {
   void mark_columns_needed_for_insert(THD *thd);
   void mark_columns_per_binlog_row_image(THD *thd);
   void mark_generated_columns(bool is_update);
-  bool is_field_used_by_generated_columns(uint field_index, int *error_no);
   void mark_gcol_in_maps(Field *field);
+  void mark_check_constraint_columns(bool is_update);
   void column_bitmaps_set(MY_BITMAP *read_set_arg, MY_BITMAP *write_set_arg);
   inline void column_bitmaps_set_no_signal(MY_BITMAP *read_set_arg,
                                            MY_BITMAP *write_set_arg) {
@@ -1665,8 +1683,8 @@ struct TABLE {
 
   bool check_read_removal(uint index);
 
-  my_ptrdiff_t default_values_offset() const {
-    return (my_ptrdiff_t)(s->default_values - record[0]);
+  ptrdiff_t default_values_offset() const {
+    return (ptrdiff_t)(s->default_values - record[0]);
   }
 
   /// Return true if table is instantiated, and false otherwise.
@@ -1838,19 +1856,26 @@ struct TABLE {
 
   /**
     Helper function for refix_value_generator_items() that fixes one column's
-    expression (be it GC or default expression).
+    expression (be it GC or default expression) and check constraint expression.
 
-    @param[in] thd           current thread
-    @param[in,out] g_expr    the expression who's items needs to be fixed
-    @param[in] table         the table it blongs to
-    @param[in] field         the column it blongs to
-    @param[in] is_gen_col    if it is a generated column or default expression
+    @param[in]     thd          current thread
+    @param[in,out] g_expr       the expression who's items needs to be fixed
+    @param[in]     table        the table it blongs to
+    @param[in]     field        the column it blongs to (for GC and Default
+                                expression).
+    @param[in]     source       Source of value generator(a generated column, a
+                                regular column with generated default value or
+                                a check constraint).
+    @param[in]     source_name  Name of the source (generated column, a reguler
+                                column with generated default value or a check
+                                constraint).
 
     @return true if error, else false
   */
   bool refix_inner_value_generator_items(THD *thd, Value_generator *g_expr,
                                          Field *field, TABLE *table,
-                                         bool is_gen_col);
+                                         Value_generator_source source,
+                                         const char *source_name);
 
   /**
     Clean any state in items associated with generated columns to be ready for
@@ -2120,7 +2145,7 @@ static inline void empty_record(TABLE *table) {
     memset(table->null_flags, 255, table->s->null_bytes);
 }
 
-enum enum_schema_table_state {
+enum enum_schema_table_state : int {
   NOT_PROCESSED = 0,
   PROCESSED_BY_CREATE_SORT_INDEX,
   PROCESSED_BY_JOIN_EXEC
@@ -2142,10 +2167,6 @@ struct FOREIGN_KEY_INFO {
 #define MY_I_S_MAYBE_NULL 1
 #define MY_I_S_UNSIGNED 2
 
-#define SKIP_OPEN_TABLE 0  // do not open table
-#define OPEN_FRM_ONLY 1    // open FRM file only
-#define OPEN_FULL_TABLE 2  // open FRM,MYD, MYI files
-
 struct ST_FIELD_INFO {
   /**
       This is used as column name.
@@ -2163,7 +2184,7 @@ struct ST_FIELD_INFO {
      be one entry in the enum for each SQL data type, although there seem to
      be a number of additional entries in the enum.
   */
-  enum enum_field_types field_type;
+  enum_field_types field_type;
   int value;
   /**
      This is used to set column attributes. By default, columns are @c NOT
@@ -2175,11 +2196,7 @@ struct ST_FIELD_INFO {
    */
   uint field_flags;  // Field atributes(maybe_null, signed, unsigned etc.)
   const char *old_name;
-  /**
-     This should be one of @c SKIP_OPEN_TABLE,
-     @c OPEN_FRM_ONLY or @c OPEN_FULL_TABLE.
-  */
-  uint open_method;
+  uint open_method;  // Not used
 };
 
 struct ST_SCHEMA_TABLE {
@@ -2195,7 +2212,7 @@ struct ST_SCHEMA_TABLE {
                        LEX_STRING *db_name, LEX_STRING *table_name);
   int idx_field1, idx_field2;
   bool hidden;
-  uint i_s_requested_object; /* the object we need to open(TABLE | VIEW) */
+  uint i_s_requested_object;  // Not used
 };
 
 #define JOIN_TYPE_LEFT 1
@@ -2450,7 +2467,7 @@ struct TABLE_LIST {
         alias(alias_arg),
         m_map(1),
         table(table_arg),
-        m_lock_descriptor(lock_type_arg),
+        m_lock_descriptor{lock_type_arg},
         db_length(db_length_arg),
         table_name_length(table_name_length_arg) {
     MDL_REQUEST_INIT(&mdl_request, MDL_key::TABLE, db, table_name,
@@ -2539,13 +2556,16 @@ struct TABLE_LIST {
   }
   Item **join_cond_optim_ref() { return &m_join_cond_optim; }
 
-  /// Get the semi-join condition for a semi-join nest, NULL otherwise
-  Item *sj_cond() const { return m_sj_cond; }
-
-  /// Set the semi-join condition for a semi-join nest
-  void set_sj_cond(Item *cond) {
-    DBUG_ASSERT(m_sj_cond == NULL);
-    m_sj_cond = cond;
+  /// @returns true if semi-join nest
+  bool is_sj_nest() const { return m_is_sj_or_aj_nest && !m_join_cond; }
+  /// @returns true if anti-join nest
+  bool is_aj_nest() const { return m_is_sj_or_aj_nest && m_join_cond; }
+  /// @returns true if anti/semi-join nest
+  bool is_sj_or_aj_nest() const { return m_is_sj_or_aj_nest; }
+  /// Makes the next a semi/antijoin nest
+  void set_sj_or_aj_nest() {
+    DBUG_ASSERT(!m_is_sj_or_aj_nest);
+    m_is_sj_or_aj_nest = true;
   }
 
   /// Merge tables from a query block into a nested join structure
@@ -2561,7 +2581,7 @@ struct TABLE_LIST {
   void cleanup_items();
 
   /// Produce a textual identification of this object
-  void print(THD *thd, String *str, enum_query_type query_type) const;
+  void print(const THD *thd, String *str, enum_query_type query_type) const;
 
   /// Check which single table inside a view that matches a table map
   bool check_single_table(TABLE_LIST **table_ref, table_map map);
@@ -2771,7 +2791,7 @@ struct TABLE_LIST {
     DBUG_ASSERT((is_view_or_derived()) && uses_materialization());
     table_name = table->s->table_name.str;
     table_name_length = table->s->table_name.length;
-    db = (char *)"";
+    db = "";
     db_length = 0;
   }
 
@@ -2808,7 +2828,7 @@ struct TABLE_LIST {
   bool materialize_derived(THD *thd);
 
   /// Clean up the query expression for a materialized derived table
-  bool cleanup_derived();
+  bool cleanup_derived(THD *thd);
 
   /// Prepare security context for a view
   bool prepare_security(THD *thd);
@@ -2883,7 +2903,7 @@ struct TABLE_LIST {
     return view != NULL ? view_name.str : table_name;
   }
   int fetch_number_of_rows();
-  bool update_derived_keys(Field *, Item **, uint);
+  bool update_derived_keys(THD *, Field *, Item **, uint, bool *);
   bool generate_keys();
 
   /// Setup a derived table to use materialization
@@ -2915,7 +2935,7 @@ struct TABLE_LIST {
 
   TABLE_LIST *outer_join_nest() const {
     if (!embedding) return NULL;
-    if (embedding->sj_cond()) return embedding->embedding;
+    if (embedding->is_sj_nest()) return embedding->embedding;
     return embedding;
   }
   /**
@@ -2941,14 +2961,19 @@ struct TABLE_LIST {
     In DELETE and UPDATE, a view used as a target table must be mergeable,
     updatable and defined over a single table.
   */
-  TABLE_LIST *updatable_base_table() {
-    TABLE_LIST *tbl = this;
+  const TABLE_LIST *updatable_base_table() const {
+    const TABLE_LIST *tbl = this;
     DBUG_ASSERT(tbl->is_updatable() && !tbl->is_multiple_tables());
     while (tbl->is_view_or_derived()) {
       tbl = tbl->merge_underlying_list;
       DBUG_ASSERT(tbl->is_updatable() && !tbl->is_multiple_tables());
     }
     return tbl;
+  }
+
+  TABLE_LIST *updatable_base_table() {
+    return const_cast<TABLE_LIST *>(
+        static_cast<const TABLE_LIST *>(this)->updatable_base_table());
   }
 
   /**
@@ -3036,7 +3061,8 @@ struct TABLE_LIST {
      once for all executions of a prepared statement).
   */
   Item *m_join_cond{nullptr};
-  Item *m_sj_cond{nullptr};  ///< Synthesized semijoin condition
+  bool m_is_sj_or_aj_nest{false};
+
  public:
   /*
     (Valid only for semi-join nests) Bitmap of tables that are within the
@@ -3234,14 +3260,31 @@ struct TABLE_LIST {
     especially important for multi-table UPDATE and DELETE.
   */
   bool updating{false};
-  bool force_index{false};              /* prefer index over table scan */
-  bool ignore_leaves{false};            /* preload only non-leaf nodes */
-  table_map dep_tables{0};              /* tables the table depends on      */
-  table_map on_expr_dep_tables{0};      /* tables on expression depends on  */
-  NESTED_JOIN *nested_join{nullptr};    /* if the element is a nested join  */
-  TABLE_LIST *embedding{nullptr};       /* nested join containing the table */
-  List<TABLE_LIST> *join_list{nullptr}; /* join list the table belongs to   */
-  bool cacheable_table{false};          /* stop PS caching */
+  /// True if using an index is preferred over a table scan.
+  bool force_index{false};
+  /// preload only non-leaf nodes (IS THIS USED???)
+  bool ignore_leaves{false};
+  /**
+    The set of tables in the query block that this table depends on.
+    Can be set due to outer join, join order hints or NOT EXISTS relationship.
+  */
+  table_map dep_tables{0};
+  /// The outer tables that an outer join's join condition depends on
+  table_map join_cond_dep_tables{0};
+  /**
+    Is non-NULL if this table reference is a nested join, ie it represents
+    the inner tables of an outer join, the tables contained in the
+    parentheses of an inner join (eliminated during resolving), the tables
+    referenced in a derived table or view, in a semi-join nest, the tables
+    from the subquery.
+  */
+  NESTED_JOIN *nested_join{nullptr};
+  /// The nested join containing this table reference.
+  TABLE_LIST *embedding{nullptr};
+  /// The join list immediately containing this table reference
+  List<TABLE_LIST> *join_list{nullptr};
+  /// stop PS caching
+  bool cacheable_table{false};
   /**
      Specifies which kind of table should be open for this element
      of table list.
@@ -3300,8 +3343,8 @@ struct TABLE_LIST {
     These attributes MUST NOT be used for any purposes but the parsing.
   */
 
-  LEX_STRING view_client_cs_name{nullptr, 0};
-  LEX_STRING view_connection_cl_name{nullptr, 0};
+  LEX_CSTRING view_client_cs_name{nullptr, 0};
+  LEX_CSTRING view_connection_cl_name{nullptr, 0};
 
   /*
     View definition (SELECT-statement) in the UTF-form.
@@ -3656,17 +3699,22 @@ static inline void dbug_tmp_restore_column_maps(
 void init_mdl_requests(TABLE_LIST *table_list);
 
 /**
-   Unpacks the definition of a generated column or default expression passed as
-   argument. Parses the text obtained from TABLE_SHARE and produces an Item.
+   Unpacks the definition of a generated column, default expression or check
+   constraint expression passed as argument. Parses the text obtained from
+   TABLE_SHARE and produces an Item.
 
   @param thd                  Thread handler
   @param table                Table with the checked field
+  @param val_generator        The expression to unpack.
+  @param source               Source of value generator(a generated column,
+                              a regular column with generated default value or
+                              a check constraint).
+  @param source_name          Name of the source (generated column, a reguler
+                              column with generated default value or a check
+                              constraint).
   @param field                Pointer to Field object
-  @param val_generator        The virtual column or default expr to be parsed.
   @param is_create_table      Indicates that table is opened as part
                               of CREATE or ALTER and does not yet exist in SE
-  @param is_gen_col           Indicates if the expression is a column or just
-                              an expression for the default value.
   @param error_reported       updated flag for the caller that no other error
                               messages are to be generated.
 
@@ -3674,10 +3722,11 @@ void init_mdl_requests(TABLE_LIST *table_list);
   @retval false Success.
 */
 
-bool unpack_value_generator(THD *thd, TABLE *table, Field *field,
+bool unpack_value_generator(THD *thd, TABLE *table,
                             Value_generator **val_generator,
-                            bool is_create_table, bool is_gen_col,
-                            bool *error_reported);
+                            Value_generator_source source,
+                            const char *source_name, Field *field,
+                            bool is_create_table, bool *error_reported);
 
 /**
    Unpack the partition expression. Parse the partition expression
@@ -3724,7 +3773,8 @@ void free_blob_buffers_and_reset(TABLE *table, uint32 size);
 int set_zone(int nr, int min_zone, int max_zone);
 void append_unescaped(String *res, const char *pos, size_t length);
 char *fn_rext(char *name);
-TABLE_CATEGORY get_table_category(const LEX_STRING &db, const LEX_STRING &name);
+TABLE_CATEGORY get_table_category(const LEX_CSTRING &db,
+                                  const LEX_CSTRING &name);
 
 /* performance schema */
 extern LEX_STRING PERFORMANCE_SCHEMA_DB_NAME;
@@ -3733,7 +3783,7 @@ extern LEX_STRING GENERAL_LOG_NAME;
 extern LEX_STRING SLOW_LOG_NAME;
 
 /* information schema */
-extern LEX_STRING INFORMATION_SCHEMA_NAME;
+extern LEX_CSTRING INFORMATION_SCHEMA_NAME;
 
 /* mysql schema name and DD ID */
 extern LEX_STRING MYSQL_SCHEMA_NAME;
@@ -3842,6 +3892,8 @@ class Common_table_expr {
     generated by open_table_from_share().
   */
   Mem_root_array<TABLE_LIST *> tmp_tables;
+  /// Name of the WITH block. Used only for EXPLAIN FORMAT=tree.
+  LEX_STRING name;
 };
 
 /**
@@ -3917,7 +3969,8 @@ class FRM_context {
     NO,
     REL,
     CHECK,
-    EMPTY,
+    EMPTY_VAL,  // EMPTY_VAL rather than EMPTY since EMPTY can conflict with
+                // system headers.
     UNKNOWN_FIELD,
     CASEDN,
     NEXT_NUMBER,

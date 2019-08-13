@@ -1,4 +1,4 @@
-/* Copyright (c) 2006, 2018, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2006, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -27,6 +27,7 @@
 #include <string.h>
 #include <algorithm>
 
+#include "include/mutex_lock.h"
 #include "my_dbug.h"
 #include "my_loglevel.h"
 #include "my_sys.h"
@@ -35,6 +36,7 @@
 #include "mysql_version.h"
 #include "mysqld_error.h"
 #include "prealloced_array.h"
+#include "sql/debug_sync.h"
 #include "sql/dynamic_ids.h"  // Server_ids
 #include "sql/log.h"
 #include "sql/mysqld.h"  // sync_masterinfo_period
@@ -85,8 +87,11 @@ enum {
   /* line for get_master_public_key */
   LINE_FOR_GET_PUBLIC_KEY = 27,
 
+  /* line for network_namespace */
+  LINE_FOR_NETWORK_NAMESPACE = 28,
+
   /* Number of lines currently used when saving master info file */
-  LINES_IN_MASTER_INFO = LINE_FOR_GET_PUBLIC_KEY
+  LINES_IN_MASTER_INFO = LINE_FOR_NETWORK_NAMESPACE
 
 };
 
@@ -121,7 +126,8 @@ const char *info_mi_fields[] = {"number_of_lines",
                                 "channel_name",
                                 "tls_version",
                                 "public_key_path",
-                                "get_public_key"};
+                                "get_public_key",
+                                "network_namespace"};
 
 const uint info_mi_table_pk_field_indexes[] = {
     LINE_FOR_CHANNEL - 1,
@@ -133,23 +139,27 @@ Master_info::Master_info(
     PSI_mutex_key *param_key_info_data_lock,
     PSI_mutex_key *param_key_info_sleep_lock,
     PSI_mutex_key *param_key_info_thd_lock,
+    PSI_mutex_key *param_key_info_rotate_lock,
     PSI_mutex_key *param_key_info_data_cond,
     PSI_mutex_key *param_key_info_start_cond,
     PSI_mutex_key *param_key_info_stop_cond,
     PSI_mutex_key *param_key_info_sleep_cond,
+    PSI_mutex_key *param_key_info_rotate_cond,
 #endif
     uint param_id, const char *param_channel)
-    : Rpl_info("I/O"
+    : Rpl_info("I/O",
 #ifdef HAVE_PSI_INTERFACE
-               ,
                param_key_info_run_lock, param_key_info_data_lock,
                param_key_info_sleep_lock, param_key_info_thd_lock,
                param_key_info_data_cond, param_key_info_start_cond,
-               param_key_info_stop_cond, param_key_info_sleep_cond
+               param_key_info_stop_cond, param_key_info_sleep_cond,
 #endif
-               ,
                param_id, param_channel),
       start_user_configured(false),
+#ifdef HAVE_PSI_INTERFACE
+      key_info_rotate_lock(param_key_info_rotate_lock),
+      key_info_rotate_cond(param_key_info_rotate_cond),
+#endif
       ssl(0),
       ssl_verify_server_cert(0),
       get_public_key(false),
@@ -162,12 +172,13 @@ Master_info::Master_info(
       master_id(0),
       checksum_alg_before_fd(binary_log::BINLOG_CHECKSUM_ALG_UNDEF),
       retry_count(master_retry_count),
-      mi_description_event(NULL),
+      mi_description_event(nullptr),
       auto_position(false),
       reset(false) {
   host[0] = 0;
   user[0] = 0;
   bind_addr[0] = 0;
+  network_namespace[0] = 0;
   password[0] = 0;
   start_password[0] = 0;
   ssl_ca[0] = 0;
@@ -186,6 +197,10 @@ Master_info::Master_info(
   ignore_server_ids = new Server_ids;
 
   gtid_monitoring_info = new Gtid_monitoring_info(&data_lock);
+
+  mysql_mutex_init(*key_info_rotate_lock, &this->rotate_lock,
+                   MY_MUTEX_INIT_FAST);
+  mysql_cond_init(*key_info_rotate_cond, &this->rotate_cond);
 
   /*channel is set in base class, rpl_info.cc*/
   snprintf(for_channel_str, sizeof(for_channel_str) - 1, " for channel '%s'",
@@ -206,10 +221,66 @@ Master_info::~Master_info() {
   /* No other administrative task is able to get this master_info */
   channel_map.assert_some_wrlock();
   m_channel_lock->unlock();
+
+  this->clear_rotate_requests();
+  mysql_mutex_destroy(&rotate_lock);
+  mysql_cond_destroy(&rotate_cond);
+
   delete m_channel_lock;
   delete ignore_server_ids;
   delete mi_description_event;
   delete gtid_monitoring_info;
+}
+
+void Master_info::request_rotate(THD *thd) {
+  DBUG_ENTER("Master_info::request_rotate(THD*)");
+  MUTEX_LOCK(lock, &this->rotate_lock);
+  this->rotate_requested.store(true);
+
+  DBUG_EXECUTE_IF("deferred_flush_relay_log", {
+    /*
+      See `gr_flush_relay_log_no_split_trx.test`
+      4) Make the `FLUSH RELAY LOG` execution path to emit
+         `signal.rpl_requested_for_a_flush` right before waiting on the
+         transaction to end.
+    */
+    const char dbug_signal[] = "now SIGNAL signal.rpl_requested_for_a_flush";
+    DBUG_ASSERT(
+        !debug_sync_set_action(current_thd, STRING_WITH_LEN(dbug_signal)));
+  });
+
+  while (this->rotate_requested.load() && !thd->killed)
+    mysql_cond_wait(&this->rotate_cond, &this->rotate_lock);
+
+  DBUG_VOID_RETURN;
+}
+
+void Master_info::clear_rotate_requests() {
+  DBUG_ENTER("Master_info::clear_rotate_requests()");
+  MUTEX_LOCK(lock, &this->rotate_lock);
+
+  if (this->rotate_requested.load()) {
+    this->rotate_requested.store(false);
+    mysql_cond_broadcast(&this->rotate_cond);
+
+    DBUG_EXECUTE_IF("deferred_flush_relay_log", {
+      /*
+        See `gr_flush_relay_log_no_split_trx.test`
+        7) Make the applier execution path to emit
+           `signal.rpl_broadcasted_rotate_end` just after finishing processing
+           the deferred flushing of the relay log.
+      */
+      const char dbug_signal[] = "now SIGNAL signal.rpl_broadcasted_rotate_end";
+      DBUG_ASSERT(
+          !debug_sync_set_action(current_thd, STRING_WITH_LEN(dbug_signal)));
+    });
+  }
+
+  DBUG_VOID_RETURN;
+}
+
+bool Master_info::is_rotate_requested() {
+  return this->rotate_requested.load();
 }
 
 /**
@@ -319,7 +390,7 @@ int Master_info::mi_init_info() {
 
   if (inited) DBUG_RETURN(0);
 
-  mysql = 0;
+  mysql = nullptr;
   file_id = 1;
   if ((check_return = check_info()) == ERROR_CHECKING_REPOSITORY) goto err;
 
@@ -359,7 +430,7 @@ const uint *Master_info::get_table_pk_field_indexes() {
 
 bool Master_info::read_info(Rpl_info_handler *from) {
   int lines = 0;
-  char *first_non_digit = NULL;
+  char *first_non_digit = nullptr;
   ulong temp_master_log_pos = 0;
   int temp_ssl = 0;
   int temp_ssl_verify_server_cert = 0;
@@ -388,7 +459,7 @@ bool Master_info::read_info(Rpl_info_handler *from) {
   */
 
   if (from->prepare_info_for_read() ||
-      from->get_info(master_log_name, sizeof(master_log_name), (char *)""))
+      from->get_info(master_log_name, sizeof(master_log_name), ""))
     DBUG_RETURN(true);
 
   lines = strtoul(master_log_name, &first_non_digit, 10);
@@ -396,14 +467,14 @@ bool Master_info::read_info(Rpl_info_handler *from) {
   if (master_log_name[0] != '\0' && *first_non_digit == '\0' &&
       lines >= LINES_IN_MASTER_INFO_WITH_SSL) {
     /* Seems to be new format => read master log name */
-    if (from->get_info(master_log_name, sizeof(master_log_name), (char *)""))
+    if (from->get_info(master_log_name, sizeof(master_log_name), ""))
       DBUG_RETURN(true);
   } else
     lines = 7;
 
   if (from->get_info(&temp_master_log_pos, (ulong)BIN_LOG_HEADER_SIZE) ||
       from->get_info(host, sizeof(host), (char *)0) ||
-      from->get_info(user, sizeof(user), (char *)"test") ||
+      from->get_info(user, sizeof(user), "test") ||
       from->get_info(password, sizeof(password), (char *)0) ||
       from->get_info((int *)&port, (int)MYSQL_PORT) ||
       from->get_info((int *)&connect_retry, (int)DEFAULT_CONNECT_RETRY))
@@ -445,8 +516,7 @@ bool Master_info::read_info(Rpl_info_handler *from) {
     Starting from 5.5 master_bind might be in the file
   */
   if (lines >= LINE_FOR_MASTER_BIND) {
-    if (from->get_info(bind_addr, sizeof(bind_addr), (char *)""))
-      DBUG_RETURN(true);
+    if (from->get_info(bind_addr, sizeof(bind_addr), "")) DBUG_RETURN(true);
   }
 
   /*
@@ -454,7 +524,7 @@ bool Master_info::read_info(Rpl_info_handler *from) {
     in the file
   */
   if (lines >= LINE_FOR_REPLICATE_IGNORE_SERVER_IDS) {
-    if (from->get_info(ignore_server_ids, (Server_ids *)NULL))
+    if (from->get_info(ignore_server_ids, (Server_ids *)nullptr))
       DBUG_RETURN(true);
   }
 
@@ -496,6 +566,11 @@ bool Master_info::read_info(Rpl_info_handler *from) {
 
   if (lines >= LINE_FOR_GET_PUBLIC_KEY) {
     if (from->get_info(&temp_get_public_key, 0)) DBUG_RETURN(true);
+  }
+
+  if (lines >= LINE_FOR_NETWORK_NAMESPACE) {
+    if (from->get_info(network_namespace, sizeof(network_namespace), (char *)0))
+      DBUG_RETURN(true);
   }
 
   ssl = (bool)temp_ssl;
@@ -542,7 +617,8 @@ bool Master_info::write_info(Rpl_info_handler *to) {
       to->set_info(retry_count) || to->set_info(ssl_crl) ||
       to->set_info(ssl_crlpath) || to->set_info((int)auto_position) ||
       to->set_info(channel) || to->set_info(tls_version) ||
-      to->set_info(public_key_path) || to->set_info(get_public_key))
+      to->set_info(public_key_path) || to->set_info(get_public_key) ||
+      to->set_info(network_namespace))
     DBUG_RETURN(true);
 
   DBUG_RETURN(false);
@@ -598,7 +674,7 @@ void Master_info::channel_wrlock() {
 }
 
 void Master_info::wait_until_no_reference(THD *thd) {
-  PSI_stage_info *old_stage = NULL;
+  PSI_stage_info *old_stage = nullptr;
 
   thd->enter_stage(&stage_waiting_for_no_channel_reference, old_stage, __func__,
                    __FILE__, __LINE__);

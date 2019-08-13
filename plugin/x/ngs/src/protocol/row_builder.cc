@@ -37,9 +37,9 @@
 #include "plugin/x/client/mysqlxclient/xdatetime.h"
 #include "plugin/x/client/mysqlxclient/xdecimal.h"
 #include "plugin/x/ngs/include/ngs/protocol/page_output_stream.h"
-#include "plugin/x/ngs/include/ngs_common/protocol_protobuf.h"
+#include "plugin/x/ngs/include/ngs/protocol/protocol_protobuf.h"
 
-using namespace ngs;
+namespace ngs {
 
 #define ADD_FIELD_HEADER()                                                   \
   DBUG_ASSERT(m_row_processing);                                             \
@@ -143,7 +143,9 @@ static inline int count_leading_zeroes(int i, dec1 val) {
     case 0:
       if (val >= 1) break;
       ++ret;  // Fall through.
-    default: { DBUG_ASSERT(false); }
+    default: {
+      DBUG_ASSERT(false);
+    }
   }
   return ret;
 }
@@ -458,3 +460,5 @@ void Row_builder::add_bit_field(const char *const value, size_t length) {
   m_out_stream->WriteVarint32(CodedOutputStream::VarintSize64(binary_value));
   m_out_stream->WriteVarint64(binary_value);
 }
+
+}  // namespace ngs

@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2018, Oracle and/or its affiliates. All rights reserved.
+   Copyright (c) 2003, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -193,6 +193,13 @@ void Qmgr::execCONTINUEB(Signal* signal)
     sendSignalWithDelay(reference(), GSN_CONTINUEB, signal, 3000, 1);
     return;
   }
+  case ZNOTIFY_STATE_CHANGE:
+  {
+    jam();
+    handleStateChange(signal, tdata0);
+    return;
+  }
+
   default:
     jam();
     // ZCOULD_NOT_OCCUR_ERROR;
@@ -227,6 +234,8 @@ void Qmgr::execFAIL_REP(Signal* signal)
     /* Failure source not included, use sender of signal as 'source' */
     failSource = refToNode(signal->getSendersBlockRef());
   }
+
+  CRASH_INSERTION(948);
 
   jamEntry();
   failReportLab(signal, failNodeId, failCause, failSource);
@@ -4044,7 +4053,7 @@ Qmgr::execAPI_VERSION_REQ(Signal * signal) {
     conf->m_inet_addr= 0;
   }
   conf->nodeId = nodeId;
-
+  conf->isSingleUser = (nodeId == getNodeState().getSingleUserApi());
   sendSignal(senderRef,
 	     GSN_API_VERSION_CONF,
 	     signal,
@@ -5053,7 +5062,7 @@ void Qmgr::systemErrorLab(Signal* signal, Uint32 line, const char * message)
   // Broadcast that this node is failing to other nodes
   failReport(signal, getOwnNodeId(), (UintR)ZTRUE, FailRep::ZOWN_FAILURE, getOwnNodeId());
 
-  // If it's known why shutdown occured
+  // If it's known why shutdown occurred
   // an error message has been passed to this function
   progError(line, NDBD_EXIT_NDBREQUIRE, message);  
 }//Qmgr::systemErrorLab()
@@ -7956,4 +7965,78 @@ Qmgr::execISOLATE_ORD(Signal* signal)
   }
 
   ndbabort();
+}
+
+
+void
+Qmgr::execNODE_STATE_REP(Signal* signal)
+{
+  jam();
+  const NodeState prevState = getNodeState();
+  SimulatedBlock::execNODE_STATE_REP(signal);
+
+  /* Check whether we are changing state */
+  const Uint32 prevStartLevel = prevState.startLevel;
+  const Uint32 newStartLevel = getNodeState().startLevel;
+
+  if (newStartLevel != prevStartLevel)
+  {
+    jam();
+    /* Inform APIs */
+    signal->theData[0] = ZNOTIFY_STATE_CHANGE;
+    signal->theData[1] = 1;
+    sendSignal(reference(), GSN_CONTINUEB, signal, 2, JBB);
+  }
+
+  return;
+}
+
+void
+Qmgr::handleStateChange(Signal* signal, Uint32 nodeToNotify)
+{
+  jam();
+  bool take_a_break = false;
+
+  do
+  {
+    const NodeInfo::NodeType nt = getNodeInfo(nodeToNotify).getType();
+
+    if (nt == NodeInfo::API ||
+        nt == NodeInfo::MGM)
+    {
+      jam();
+
+      NodeRecPtr notifyNode;
+      notifyNode.i = nodeToNotify;
+      ptrCheckGuard(notifyNode, MAX_NODES, nodeRec);
+
+      if (notifyNode.p->phase == ZAPI_ACTIVE)
+      {
+        jam();
+        ndbassert(c_connectedNodes.get(nodeToNotify));
+
+        /**
+         * Ok, send an unsolicited API_REGCONF to inform
+         * the API of the state change
+         */
+        set_hb_count(nodeToNotify) = 0;
+        sendApiRegConf(signal, nodeToNotify);
+
+        take_a_break = true;
+      }
+    }
+
+    nodeToNotify++;
+  } while (nodeToNotify < MAX_NODES &&
+           !take_a_break);
+
+  if (nodeToNotify < MAX_NODES)
+  {
+    jam();
+    signal->theData[0] = ZNOTIFY_STATE_CHANGE;
+    signal->theData[1] = nodeToNotify;
+    sendSignal(reference(), GSN_CONTINUEB, signal, 2, JBB);
+  }
+
+  return;
 }

@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2011, 2018, Oracle and/or its affiliates. All rights reserved.
+   Copyright (c) 2011, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -25,6 +25,8 @@
 #ifndef NDB_LOCAL_CONNECTION_H
 #define NDB_LOCAL_CONNECTION_H
 
+#include <string>
+
 #include "my_inttypes.h"
 #include "mysql/mysql_lex_string.h"
 
@@ -38,7 +40,7 @@ class THD;
   The functionality is implemented by concatenating SQL
   queries and executing those using Ed_connection. Should
   the SQL query fail, the exact error message and all
-  warning that occured can be examined in order to handle
+  warning that occurred can be examined in order to handle
   the error in a graceful way.
 
 */
@@ -50,19 +52,16 @@ public:
   bool truncate_table(const char* db, const char* table,
                       bool ignore_no_such_table);
 
-  bool flush_table(const char* db, size_t db_length,
-                   const char* table, size_t table_length);
+  bool delete_rows(const std::string &db, const std::string &table,
+                   int ignore_no_such_table, const std::string &where);
 
-  bool delete_rows(const char* db, size_t db_length,
-                   const char* table, size_t table_length,
-                   bool ignore_no_such_table,
-                   ... /* where clause, NULL terminated list of strings */);
+  bool create_util_table(const std::string& table_def_sql);
 
-  bool create_sys_table(const char* db, size_t db_length,
-                        const char* table, size_t table_length,
-                        bool create_if_not_exists,
-                        const char* create_definiton,
-                        const char* create_options);
+  bool create_database(const std::string& database_name);
+
+  bool drop_database(const std::string& database_name);
+
+  bool execute_database_ddl(const std::string& ddl_query);
 
   /* Don't use this function for new implementation, backward compat. only */
   bool raw_run_query(const char* query, size_t query_length,

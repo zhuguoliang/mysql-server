@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2016, 2018, Oracle and/or its affiliates. All rights reserved.
+  Copyright (c) 2016, 2019, Oracle and/or its affiliates. All rights reserved.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -71,7 +71,8 @@ ClusterMetadata::ClusterMetadata(const std::string &user,
                                  int connect_timeout, int read_timeout,
                                  int /*connection_attempts*/,
                                  std::chrono::milliseconds ttl,
-                                 const mysqlrouter::SSLOptions &ssl_options) {
+                                 const mysqlrouter::SSLOptions &ssl_options,
+                                 const bool use_gr_notifications) {
   this->ttl_ = ttl;
   this->user_ = user;
   this->password_ = password;
@@ -98,6 +99,11 @@ ClusterMetadata::ClusterMetadata(const std::string &user,
     }
   }
   ssl_options_ = ssl_options;
+
+  if (use_gr_notifications) {
+    gr_notifications_listener_.reset(
+        new GRNotificationListener(user, password));
+  }
 }
 
 /** @brief Destructor
@@ -156,6 +162,7 @@ void ClusterMetadata::update_replicaset_status(
     const std::string &name,
     metadata_cache::ManagedReplicaSet
         &replicaset) {  // throws metadata_cache::metadata_error
+
   log_debug("Updating replicaset status from GR for '%s'", name.c_str());
 
   // iterate over all cadidate nodes until we find the node that is part of
@@ -482,19 +489,16 @@ ClusterMetadata::fetch_instances_from_metadata_server(
       ";");
 
   // example response
+  // clang-format off
   // +-----------------+--------------------------------------+------+--------+---------------+----------+--------------------------------+--------------------------+
-  // | replicaset_name | mysql_server_uuid                    | role | weight |
-  // version_token | location | I.addresses->>'$.mysqlClassic' |
-  // I.addresses->>'$.mysqlX' |
+  // | replicaset_name | mysql_server_uuid                    | role | weight | version_token | location | I.addresses->>'$.mysqlClassic' | I.addresses->>'$.mysqlX' |
   // +-----------------+--------------------------------------+------+--------+---------------+----------+--------------------------------+--------------------------+
-  // | default         | 30ec658e-861d-11e6-9988-08002741aeb6 | HA   |   NULL |
-  // NULL | blabla   | localhost:3310                 | NULL | | default |
-  // 3acfe4ca-861d-11e6-9e56-08002741aeb6 | HA   |   NULL |          NULL |
-  // blabla   | localhost:3320                 | NULL                     | |
-  // default         | 4c08b4a2-861d-11e6-a256-08002741aeb6 | HA   |   NULL |
-  // NULL | blabla   | localhost:3330                 | NULL |
+  // | default         | 30ec658e-861d-11e6-9988-08002741aeb6 | HA   | NULL   | NULL          | blabla   | localhost:3310                 | NULL                     |
+  // | default         | 3acfe4ca-861d-11e6-9e56-08002741aeb6 | HA   | NULL   | NULL          | blabla   | localhost:3320                 | NULL                     |
+  // | default         | 4c08b4a2-861d-11e6-a256-08002741aeb6 | HA   | NULL   | NULL          | blabla   | localhost:3330                 | NULL                     |
   // +-----------------+--------------------------------------+------+--------+---------------+----------+--------------------------------+--------------------------+
-
+  // clang-format on
+  //
   // The following instance map stores a list of servers mapped to every
   // replicaset name.
   // {
@@ -529,8 +533,8 @@ ClusterMetadata::fetch_instances_from_metadata_server(
       std::string::size_type p;
       if ((p = uri.find(':')) != std::string::npos) {
         s.host = uri.substr(0, p);
-        s.port = static_cast<unsigned int>(
-            strtoi_checked(uri.substr(p + 1).c_str()));
+        s.port =
+            static_cast<uint16_t>(strtoi_checked(uri.substr(p + 1).c_str()));
       } else {
         s.host = uri;
         s.port = 3306;
@@ -547,8 +551,8 @@ ClusterMetadata::fetch_instances_from_metadata_server(
         std::string::size_type p;
         if ((p = uri.find(':')) != std::string::npos) {
           s.host = uri.substr(0, p);
-          s.xport = static_cast<unsigned int>(
-              strtoi_checked(uri.substr(p + 1).c_str()));
+          s.xport =
+              static_cast<uint16_t>(strtoi_checked(uri.substr(p + 1).c_str()));
         } else {
           s.host = uri;
           s.xport = 33060;
@@ -586,6 +590,17 @@ ClusterMetadata::fetch_instances_from_metadata_server(
   }
 
   return replicaset_map;
+}
+
+void ClusterMetadata::setup_gr_notifications_listener(
+    const std::vector<metadata_cache::ManagedInstance> &instances,
+    const GRNotificationListener::NotificationClb &callback) {
+  if (gr_notifications_listener_)
+    gr_notifications_listener_->setup(instances, callback);
+}
+
+void ClusterMetadata::shutdown_gr_notifications_listener() {
+  gr_notifications_listener_.reset();
 }
 
 #if 0  // not used so far

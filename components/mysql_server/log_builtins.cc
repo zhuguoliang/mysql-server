@@ -1,4 +1,4 @@
-/* Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2017, 2019, Oracle and/or its affiliates. All rights reserved.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
@@ -169,7 +169,9 @@ struct log_line_buffer {
   log_line ll;            ///< log-event we're buffering
   log_line_buffer *next;  ///< chronologically next log-event
 };
+/// Pointer to the first element in the list of buffered log messages
 static log_line_buffer *log_line_buffer_start = nullptr;
+/// Where to write the pointer to the newly-created tail-element of the list
 static log_line_buffer **log_line_buffer_tail = &log_line_buffer_start;
 
 static ulonglong log_buffering_timeout = 0;
@@ -310,31 +312,31 @@ typedef struct _log_item_wellknown_key {
   error code.  Et cetera!
 */
 static const log_item_wellknown_key log_item_wellknown_keys[] = {
-    {C_STRING_WITH_LEN("--ERROR--"), LOG_UNTYPED, LOG_ITEM_END},
-    {C_STRING_WITH_LEN("log_type"), LOG_INTEGER, LOG_ITEM_LOG_TYPE},
-    {C_STRING_WITH_LEN("err_code"), LOG_INTEGER, LOG_ITEM_SQL_ERRCODE},
-    {C_STRING_WITH_LEN("err_symbol"), LOG_CSTRING, LOG_ITEM_SQL_ERRSYMBOL},
-    {C_STRING_WITH_LEN("SQL_state"), LOG_CSTRING, LOG_ITEM_SQL_STATE},
-    {C_STRING_WITH_LEN("OS_errno"), LOG_INTEGER, LOG_ITEM_SYS_ERRNO},
-    {C_STRING_WITH_LEN("OS_errmsg"), LOG_CSTRING, LOG_ITEM_SYS_STRERROR},
-    {C_STRING_WITH_LEN("source_file"), LOG_CSTRING, LOG_ITEM_SRC_FILE},
-    {C_STRING_WITH_LEN("source_line"), LOG_INTEGER, LOG_ITEM_SRC_LINE},
-    {C_STRING_WITH_LEN("function"), LOG_CSTRING, LOG_ITEM_SRC_FUNC},
-    {C_STRING_WITH_LEN("subsystem"), LOG_CSTRING, LOG_ITEM_SRV_SUBSYS},
-    {C_STRING_WITH_LEN("component"), LOG_CSTRING, LOG_ITEM_SRV_COMPONENT},
-    {C_STRING_WITH_LEN("user"), LOG_LEX_STRING, LOG_ITEM_MSC_USER},
-    {C_STRING_WITH_LEN("host"), LOG_LEX_STRING, LOG_ITEM_MSC_HOST},
-    {C_STRING_WITH_LEN("thread"), LOG_INTEGER, LOG_ITEM_SRV_THREAD},
-    {C_STRING_WITH_LEN("query_id"), LOG_INTEGER, LOG_ITEM_SQL_QUERY_ID},
-    {C_STRING_WITH_LEN("table"), LOG_CSTRING, LOG_ITEM_SQL_TABLE_NAME},
-    {C_STRING_WITH_LEN("prio"), LOG_INTEGER, LOG_ITEM_LOG_PRIO},
-    {C_STRING_WITH_LEN("label"), LOG_CSTRING, LOG_ITEM_LOG_LABEL},
-    {C_STRING_WITH_LEN("verbatim"), LOG_CSTRING, LOG_ITEM_LOG_VERBATIM},
-    {C_STRING_WITH_LEN("msg"), LOG_CSTRING, LOG_ITEM_LOG_MESSAGE},
-    {C_STRING_WITH_LEN("msg_id"), LOG_INTEGER, LOG_ITEM_LOG_LOOKUP},
-    {C_STRING_WITH_LEN("time"), LOG_CSTRING, LOG_ITEM_LOG_TIMESTAMP},
-    {C_STRING_WITH_LEN("buffered"), LOG_INTEGER, LOG_ITEM_LOG_BUFFERED},
-    {C_STRING_WITH_LEN("and_n_more"), LOG_INTEGER, LOG_ITEM_LOG_SUPPRESSED},
+    {STRING_WITH_LEN("--ERROR--"), LOG_UNTYPED, LOG_ITEM_END},
+    {STRING_WITH_LEN("log_type"), LOG_INTEGER, LOG_ITEM_LOG_TYPE},
+    {STRING_WITH_LEN("err_code"), LOG_INTEGER, LOG_ITEM_SQL_ERRCODE},
+    {STRING_WITH_LEN("err_symbol"), LOG_CSTRING, LOG_ITEM_SQL_ERRSYMBOL},
+    {STRING_WITH_LEN("SQL_state"), LOG_CSTRING, LOG_ITEM_SQL_STATE},
+    {STRING_WITH_LEN("OS_errno"), LOG_INTEGER, LOG_ITEM_SYS_ERRNO},
+    {STRING_WITH_LEN("OS_errmsg"), LOG_CSTRING, LOG_ITEM_SYS_STRERROR},
+    {STRING_WITH_LEN("source_file"), LOG_CSTRING, LOG_ITEM_SRC_FILE},
+    {STRING_WITH_LEN("source_line"), LOG_INTEGER, LOG_ITEM_SRC_LINE},
+    {STRING_WITH_LEN("function"), LOG_CSTRING, LOG_ITEM_SRC_FUNC},
+    {STRING_WITH_LEN("subsystem"), LOG_CSTRING, LOG_ITEM_SRV_SUBSYS},
+    {STRING_WITH_LEN("component"), LOG_CSTRING, LOG_ITEM_SRV_COMPONENT},
+    {STRING_WITH_LEN("user"), LOG_LEX_STRING, LOG_ITEM_MSC_USER},
+    {STRING_WITH_LEN("host"), LOG_LEX_STRING, LOG_ITEM_MSC_HOST},
+    {STRING_WITH_LEN("thread"), LOG_INTEGER, LOG_ITEM_SRV_THREAD},
+    {STRING_WITH_LEN("query_id"), LOG_INTEGER, LOG_ITEM_SQL_QUERY_ID},
+    {STRING_WITH_LEN("table"), LOG_CSTRING, LOG_ITEM_SQL_TABLE_NAME},
+    {STRING_WITH_LEN("prio"), LOG_INTEGER, LOG_ITEM_LOG_PRIO},
+    {STRING_WITH_LEN("label"), LOG_CSTRING, LOG_ITEM_LOG_LABEL},
+    {STRING_WITH_LEN("verbatim"), LOG_CSTRING, LOG_ITEM_LOG_VERBATIM},
+    {STRING_WITH_LEN("msg"), LOG_CSTRING, LOG_ITEM_LOG_MESSAGE},
+    {STRING_WITH_LEN("msg_id"), LOG_INTEGER, LOG_ITEM_LOG_LOOKUP},
+    {STRING_WITH_LEN("time"), LOG_CSTRING, LOG_ITEM_LOG_TIMESTAMP},
+    {STRING_WITH_LEN("buffered"), LOG_INTEGER, LOG_ITEM_LOG_BUFFERED},
+    {STRING_WITH_LEN("and_n_more"), LOG_INTEGER, LOG_ITEM_LOG_SUPPRESSED},
     /*
       We should never see the following key names in normal operations
       (but see the user-specified key instead).  These have entries all
@@ -344,10 +346,10 @@ static const log_item_wellknown_key log_item_wellknown_keys[] = {
       readability, and allow for easily creating debug info of the form,
       "%s:%s=\"%s\"", wellknown_name, item->key, item->value
     */
-    {C_STRING_WITH_LEN("misc_float"), LOG_FLOAT, LOG_ITEM_GEN_FLOAT},
-    {C_STRING_WITH_LEN("misc_integer"), LOG_INTEGER, LOG_ITEM_GEN_INTEGER},
-    {C_STRING_WITH_LEN("misc_string"), LOG_LEX_STRING, LOG_ITEM_GEN_LEX_STRING},
-    {C_STRING_WITH_LEN("misc_cstring"), LOG_CSTRING, LOG_ITEM_GEN_CSTRING}};
+    {STRING_WITH_LEN("misc_float"), LOG_FLOAT, LOG_ITEM_GEN_FLOAT},
+    {STRING_WITH_LEN("misc_integer"), LOG_INTEGER, LOG_ITEM_GEN_INTEGER},
+    {STRING_WITH_LEN("misc_string"), LOG_LEX_STRING, LOG_ITEM_GEN_LEX_STRING},
+    {STRING_WITH_LEN("misc_cstring"), LOG_CSTRING, LOG_ITEM_GEN_CSTRING}};
 
 static uint log_item_wellknown_keys_count =
     (sizeof(log_item_wellknown_keys) / sizeof(log_item_wellknown_key));
@@ -472,7 +474,7 @@ void log_item_get_float(log_item *li, double *f) {
   @param[out]  len     size_t pointer to store the length of  the value in
 */
 void log_item_get_string(log_item *li, char **str, size_t *len) {
-  if ((*str = (char *)li->data.data_string.str) == nullptr)
+  if ((*str = const_cast<char *>(li->data.data_string.str)) == nullptr)
     *len = 0;
   else if (li->item_class & LOG_CSTRING)
     *len = strlen(li->data.data_string.str);
@@ -1351,7 +1353,26 @@ static int log_sink_trad(void *instance MY_ATTRIBUTE((unused)), log_line *ll) {
 
 /**
   services: log sinks: buffered logging
-  Will save log-event for later filtering and output.
+
+  During start-up, we buffer log-info until a) we have basic info for
+  the built-in logger (what file to log to, verbosity, and so on), and
+  b) advanced info (any logging components to load, any configuration
+  for them, etc.).
+
+  As a failsafe, if start-up takes very, very long, and a time-out is
+  reached before reaching b) and we actually have something worth
+  reporting (e.g. errors, as opposed to info), we try to keep the user
+  informed by using the basic logger configured in a), while going on
+  buffering all info and flushing it to any advanced loggers when b)
+  is reached.
+
+  1) This function checks and, if needed, updates the time-out, and calls
+     the flush functions as needed. It is internal to the logger and should
+     not be called from elsewhere.
+
+  2) Function will save log-event (if given) for later filtering and output.
+
+  3) Function acquires/releases THR_LOCK_log_buffered if initialized.
 
   @param           instance             instance handle
                                         Not currently used in this writer;
@@ -1360,66 +1381,76 @@ static int log_sink_trad(void *instance MY_ATTRIBUTE((unused)), log_line *ll) {
                                         is called before the structured
                                         logger's locks are initialized, so
                                         that must remain a valid argument!
-  @param           ll                   the log line to write
+  @param           ll                   The log line to write,
+                                        or nullptr to not add a new logline,
+                                        but to check whether the time-out
+                                        has been reached and if so, flush
+                                        as needed.
 
   @retval          -1                   can not add event to buffer (OOM?)
   @retval          >0                   number of added fields
 */
 static int log_sink_buffer(void *instance MY_ATTRIBUTE((unused)),
                            log_line *ll) {
-  log_line_buffer *llb;  ///< log-line buffer
+  log_line_buffer *llb = nullptr;  ///< log-line buffer
   ulonglong now = 0;
   int count = 0;
 
-  if ((llb = (log_line_buffer *)my_malloc(key_memory_log_error_stack,
-                                          sizeof(log_line_buffer), MYF(0))) ==
-      nullptr)
-    return -1; /* purecov: inspected */
-
-  llb->next = nullptr;
-
-  /*
-    Don't let the submitter free the keys/values; we'll do it later when
-    the buffer is flushed and then de-allocated!
-    (No lock needed for copy as the target-event is still private to this
-    function, and the source-event is alloc'd in the caller.)
-  */
-  log_line_duplicate(&llb->ll, ll);
-
-  /*
-    Remember when an error event was buffered.
-    If buffered logging times out and the buffer contains an error,
-    we force a premature flush so the user will know what's going on.
-  */
-  {
-    int index_prio = log_line_index_by_type(&llb->ll, LOG_ITEM_LOG_PRIO);
-
-    if ((index_prio >= 0) &&
-        (llb->ll.item[index_prio].data.data_integer <= ERROR_LEVEL))
-      log_buffering_flushworthy = true;
-  }
-
-  // save the time so we can regenerate the timestamp once we have the options
+  // save the time to regenerate the timestamp once we have the options
   now = my_micro_time();
-  if (!log_line_full(&llb->ll)) {
-    log_line_item_set(&llb->ll, LOG_ITEM_LOG_BUFFERED)->data_integer = now;
+
+  if (ll != nullptr) {
+    if ((llb = (log_line_buffer *)my_malloc(key_memory_log_error_stack,
+                                            sizeof(log_line_buffer), MYF(0))) ==
+        nullptr)
+      return -1; /* purecov: inspected */
+
+    llb->next = nullptr;
+
+    /*
+      Don't let the submitter free the keys/values; we'll do it later when
+      the buffer is flushed and then de-allocated!
+      (No lock needed for copy as the target-event is still private to this
+      function, and the source-event is alloc'd in the caller.)
+    */
+    log_line_duplicate(&llb->ll, ll);
+
+    /*
+      Remember when an error event was buffered.
+      If buffered logging times out and the buffer contains an error,
+      we force a premature flush so the user will know what's going on.
+    */
+    {
+      int index_prio = log_line_index_by_type(&llb->ll, LOG_ITEM_LOG_PRIO);
+
+      if ((index_prio >= 0) &&
+          (llb->ll.item[index_prio].data.data_integer <= ERROR_LEVEL))
+        log_buffering_flushworthy = true;
+    }
+
+    if (!log_line_full(&llb->ll)) {
+      log_line_item_set(&llb->ll, LOG_ITEM_LOG_BUFFERED)->data_integer = now;
+    }
   }
 
   // insert the new last event into the buffer (a singly linked list of events)
   if (log_builtins_inited) mysql_mutex_lock(&THR_LOCK_log_buffered);
 
-  *log_line_buffer_tail = llb;
-  log_line_buffer_tail = &(llb->next);
+  if (ll != nullptr) {
+    *log_line_buffer_tail = llb;
+    log_line_buffer_tail = &(llb->next);
 
-  // Save as time-out flush may release underlying log line buffer, llb.
-  count = llb->ll.count;
+    // Save as time-out flush may release underlying log line buffer, llb.
+    count = llb->ll.count;
+  }
 
   // handle buffering time-out
   if (log_buffering_timeout == 0)
     // Buffering very first event; set up initial time-out ...
     log_buffering_timeout =
         now + (LOG_BUFFERING_TIMEOUT_AFTER * LOG_BUFFERING_TIME_SCALE);
-  else if (now > log_buffering_timeout) {
+
+  if (now > log_buffering_timeout || ll == nullptr) {
     // We timed out. Flush, and set up new, possibly shorter subsequent timeout.
 
     /*
@@ -1455,6 +1486,15 @@ static int log_sink_buffer(void *instance MY_ATTRIBUTE((unused)),
 }
 
 /**
+  Convenience function. Same as log_sink_buffer(), except we only
+  check whether the time-out for buffered logging has been reached
+  during start-up, and act accordingly; no new logging information
+  is added (i.e., we only provide functionality 1 described in the
+  preamble for log_sink_buffer() above).
+*/
+void log_sink_buffer_check_timeout(void) { log_sink_buffer(nullptr, nullptr); }
+
+/**
   Process all buffered log-events.
 
   LOG_BUFFER_DISCARD_ONLY simply releases all buffered log-events
@@ -1488,17 +1528,52 @@ static int log_sink_buffer(void *instance MY_ATTRIBUTE((unused)),
                 needs to hold THR_LOCK_log_buffered
                 while calling this; for the other modes,
                 this function will acquire and release the
-                lock as needed.
+                lock as needed; in this second scenario,
+                the lock will not be held while calling
+                log_services (via log_line_submit()).
 */
 void log_sink_buffer_flush(enum log_sink_buffer_flush_mode mode) {
-  log_line_buffer *llp;
+  log_line_buffer *llp, *local_head, *local_tail = nullptr;
+
+  /*
+    "steal" public list of buffered log events
+
+    The general mechanism is that move the buffered events from
+    the global list to one local to this function, iterate over
+    it, and then put it back. If anything was added to the global
+    list we emptied while were working, we append the new items
+    from the global list to the end of the "stolen" list, and then
+    make that union the new global list. The grand idea here is
+    that this way, we only have to acquire a lock very briefly
+    (while updating the global list's head and tail, once for
+    "stealing" it, once for giving it back), rather than holding
+    a lock the entire time, or locking each event individually,
+    while still remaining safe if one caller starts a
+    flush-with-print, and then another runs a flush-to-delete
+    that might catch up and cause trouble if we neither held
+    a lock nor stole the list.
+  */
 
   if (log_builtins_inited && (mode != LOG_BUFFER_REPORT_AND_KEEP))
     mysql_mutex_lock(&THR_LOCK_log_buffered);
 
-  llp = log_line_buffer_start;
+  local_head = log_line_buffer_start;             // save list head
+  log_line_buffer_start = nullptr;                // empty public list
+  log_line_buffer_tail = &log_line_buffer_start;  // adjust tail of public list
+
+  if (log_builtins_inited && (mode != LOG_BUFFER_REPORT_AND_KEEP))
+    mysql_mutex_unlock(&THR_LOCK_log_buffered);
+
+  // get head element from list of buffered log events
+  llp = local_head;
 
   while (llp != nullptr) {
+    /*
+      Forward the buffered lines to log-writers
+      (other than the buffered writer), unless
+      we're in "discard" mode, in which case,
+      we'll just throw the information away.
+    */
     if (mode != LOG_BUFFER_DISCARD_ONLY) {
       log_service_instance *lsi = log_service_instances;
 
@@ -1545,12 +1620,35 @@ void log_sink_buffer_flush(enum log_sink_buffer_flush_mode mode) {
           my_free(date);  // log_line is full
       }                   /* purecov: end */
 
+      /*
+        If no log-service is configured (because log_builtins_init()
+        hasn't run and initialized the log-pipeline), or if the
+        log-service is the buffered writer (which is only available
+        internally and used during start-up), it's still early in the
+        start-up sequence, so we may not have all configured external
+        log-components yet. Therefore, and since this is a fallback
+        only, we ignore the configuration and use the built-in services
+        that we know are available, on the grounds that when something
+        goes wrong, information with undesired formatting is still
+        better than not knowing about the issue at all.
+      */
       if ((lsi == nullptr) || (lsi->sce->chistics & LOG_SERVICE_BUFFER)) {
         /*
-          We're aborting early so loadable components may not
-          yet be available; use built-ins to be sure -- after
-          all, getting here means we ran into an issue, so we'd
-          better make very sure the user learns about it!
+          This is a fallback used when start-up takes very long.
+
+          In fallback modes, we run with default settings and
+          services.
+
+          In "keep" mode (that is, "start-up's taking a long time,
+          so show the user the info so far in the basic format, but
+          keep the log-events so we can log them properly later"),
+          we expect to be able to log the events with the correct
+          settings and services later (if start-up gets that far).
+          As the services we use in the meantime may change or even
+          remove log events, we'll let the services work on a
+          temporary copy of the events here. The final logging will
+          then use the original event. This way, no information is
+          lost.
         */
         if (mode == LOG_BUFFER_REPORT_AND_KEEP) {
           log_line temp_line;  // copy the line so the filter may mangle it
@@ -1563,31 +1661,90 @@ void log_sink_buffer_flush(enum log_sink_buffer_flush_mode mode) {
 
           log_line_item_free_all(&temp_line);  // release our temporary copy
 
-          llp = llp->next;  // go to next element, keep head/tail pointers same
+          local_tail = llp;
+          llp = llp->next;  // go to next element, keep head pointer the same
           continue;         // skip the free()-ing
 
         } else {  // LOG_BUFFER_PROCESS_AND_DISCARD
+          /*
+            This is a fallback used primarily when start-up is aborted.
+
+            If we get here, flush_error_log_messages() was called
+            before logging came out of buffered mode. (If it was
+            called after buffered modes completes, we should land
+            in the following branch instead.)
+
+            We're asked to print all log-info so far using basic
+            logging, and to then throw it away (rather than keep
+            it around for proper logging). This usually implies
+            that we're shutting down because some unrecoverable
+            situation has arisen during start-up, so a) the user
+            needs to know about it even if full logging (as
+            configured) is not available yet, and b) we'll shut
+            down before we'll ever get full logging, so keeping
+            the info around is pointless.
+          */
           if (log_filter_builtin_rules != nullptr)
             log_builtins_filter_run(log_filter_builtin_rules, &llp->ll);
           log_sink_trad(nullptr, &llp->ll);
         }
-      } else {                      // !LOG_SERVICE_BUFFER
+      } else {  // !LOG_SERVICE_BUFFER
+        /*
+          If we get here, logging has left the buffered phase, and
+          we can write out the log-events using the configuration
+          requested by the user, as it should be!
+        */
         log_line_submit(&llp->ll);  // frees keys + values
         goto kv_freed;
       }
     }
 
-    log_line_item_free_all(&log_line_buffer_start->ll);  // free key/value pairs
+    log_line_item_free_all(&local_head->ll);  // free key/value pairs
   kv_freed:
-    log_line_buffer_start = log_line_buffer_start->next;  // delist event
-    my_free(llp);                                         // free buffered event
-    llp = log_line_buffer_start;
+    local_head = local_head->next;  // delist event
+    my_free(llp);                   // free buffered event
+    llp = local_head;
   }
 
-  if (mode != LOG_BUFFER_REPORT_AND_KEEP) {
-    log_line_buffer_tail = &log_line_buffer_start;  // reset tail pointer
-    if (log_builtins_inited) mysql_mutex_unlock(&THR_LOCK_log_buffered);
+  if (log_builtins_inited && (mode != LOG_BUFFER_REPORT_AND_KEEP))
+    mysql_mutex_lock(&THR_LOCK_log_buffered);
+
+  /*
+    At this point, if (local_head == nullptr), we either didn't have
+    a list to begin with, or we just emptied the local version.
+    Since we also emptied the global version at the top, whatever's
+    in there now (still empty, or new events attached while we were
+    processing) is now authoritive, and no change is needed here.
+
+    If local_head is non-NULL, we started with a non-empty local list
+    and mode was KEEP. In that case, we merge the local list back into
+    the global one:
+  */
+
+  if (local_head != nullptr) {
+    DBUG_ASSERT(local_tail != nullptr);
+
+    /*
+      Append global list to end of local list. If global list is still
+      empty, the global tail pointer points at the global anchor, so
+      we set the global tail pointer to the next-pointer in last stolen
+      item. If global list was non-empty, the tail pointer already
+      points at the correct element's next-pointer (the correct element
+      being the last one in the global list, as we'll append the
+      global list to the end of the local list).
+    */
+    if ((local_tail->next = log_line_buffer_start) == nullptr)
+      log_line_buffer_tail = &local_tail->next;
+
+    /*
+      Return the stolen list, with any log-events that happened while
+      we were processing appended to its end.
+    */
+    log_line_buffer_start = local_head;
   }
+
+  if (log_builtins_inited && (mode != LOG_BUFFER_REPORT_AND_KEEP))
+    mysql_mutex_unlock(&THR_LOCK_log_buffered);
 }
 
 /**
@@ -1980,7 +2137,7 @@ void log_service_cache_entry_free::operator()(
 
   if (sce->name != nullptr) my_free(sce->name);
 
-  assert(sce->opened == 0);
+  DBUG_ASSERT(sce->opened == 0);
 
   if (sce->service != nullptr) imp_mysql_server_registry.release(sce->service);
 
@@ -2202,7 +2359,7 @@ int log_builtins_error_stack(const char *conf, bool check_only, size_t *pos) {
     sce = key_and_value.second.get();
     sce->requested = 0;
 
-    assert(check_only || (sce->opened == 0));
+    DBUG_ASSERT(check_only || (sce->opened == 0));
   }
 
   sce = nullptr;
@@ -2291,7 +2448,7 @@ int log_builtins_error_stack(const char *conf, bool check_only, size_t *pos) {
         if (log_service_instances == nullptr)
           log_service_instances = lsi_new;
         else {
-          assert(lsi != nullptr);
+          DBUG_ASSERT(lsi != nullptr);
           lsi->next = lsi_new;
         }
 
@@ -2350,9 +2507,9 @@ done:
 int log_builtins_exit() {
   if (!log_builtins_inited) return -1;
 
+  mysql_rwlock_wrlock(&THR_LOCK_log_stack);
   mysql_mutex_lock(&THR_LOCK_log_buffered);
   mysql_mutex_lock(&THR_LOCK_log_syseventlog);
-  mysql_rwlock_wrlock(&THR_LOCK_log_stack);
 
   log_builtins_filter_exit();
   log_service_instance_release_all();
@@ -3301,7 +3458,7 @@ DEFINE_METHOD(size_t, log_builtins_string_imp::length, (const char *s)) {
 */
 DEFINE_METHOD(char *, log_builtins_string_imp::find_first,
               (const char *s, int c)) {
-  return strchr((char *)s, c);
+  return strchr(const_cast<char *>(s), c);
 }
 
 /**
@@ -3309,7 +3466,7 @@ DEFINE_METHOD(char *, log_builtins_string_imp::find_first,
 */
 DEFINE_METHOD(char *, log_builtins_string_imp::find_last,
               (const char *s, int c)) {
-  return strrchr((char *)s, c);
+  return strrchr(const_cast<char *>(s), c);
 }
 
 /**

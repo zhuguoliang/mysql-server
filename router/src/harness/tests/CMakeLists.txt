@@ -1,4 +1,4 @@
-# Copyright (c) 2015, 2018, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2015, 2019, Oracle and/or its affiliates. All rights reserved.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
@@ -21,7 +21,6 @@
 # Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 INCLUDE_DIRECTORIES(SYSTEM ${GTEST_INCLUDE_DIRS} ${GMOCK_INCLUDE_DIRS})
-INCLUDE_DIRECTORIES(include)
 
 IF(NOT BUILD_IS_SINGLE_CONFIG)
   FOREACH(config ${CMAKE_CONFIGURATION_TYPES})
@@ -44,6 +43,7 @@ ADD_SUBDIRECTORY(plugins)
 SET(TEST_MODULE harness)
 
 SET(TESTS
+  test_utility_string.cc
   test_loader.cc
   test_loader_lifecycle.cc
   test_logging.cc
@@ -61,11 +61,17 @@ SET(TESTS
   test_mysql_router_thread.cc
   test_mpmc_queue.cc
   test_dynamic_state.cc
+  test_arg_handler.cc
+  test_vt100.cc
+  test_string_utils.cc
 )
 
 FOREACH(TEST ${TESTS})
   add_test_file(${TEST} MODULE ${TEST_MODULE}
     INCLUDE_DIRS ${MySQLRouter_SOURCE_DIR}/src/harness/shared/include/
+    INCLUDE_DIRS ${MySQLRouter_SOURCE_DIR}/src/harness/src/
+    INCLUDE_DIRS ${MySQLRouter_SOURCE_DIR}/src/harness/tests/include/
+    INCLUDE_DIRS ${MySQLRouter_SOURCE_DIR}/tests/
     LIB_DEPENDS test-helpers)
 ENDFOREACH()
 

@@ -1,4 +1,4 @@
-/* Copyright (c) 2000, 2018, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2000, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -32,6 +32,8 @@
 
 #include "my_config.h"
 
+#include <string>
+
 #include <string.h>
 
 #ifdef _WIN32
@@ -39,15 +41,13 @@
 #endif
 #include "m_string.h"
 #include "my_dbug.h"
+#include "my_getpwnam.h"
 #include "my_inttypes.h"
 #include "my_io.h"
 #include "my_sys.h"
 #include "mysys/my_static.h"
-#ifdef HAVE_PWD_H
-#include <pwd.h>
-#endif
 
-static char *expand_tilde(char **path);
+static std::string expand_tilde(char **path);
 
 /**
   Remove unwanted chars from dirname.
@@ -75,9 +75,8 @@ static char *expand_tilde(char **path);
 */
 
 size_t cleanup_dirname(char *to, const char *from) {
-  size_t length;
   char *pos;
-  char *from_ptr;
+  const char *from_ptr;
   char *start;
   char parent[5], /* for "FN_PARENTDIR" */
       buff[FN_REFLEN + 1], *end_parentdir;
@@ -88,17 +87,20 @@ size_t cleanup_dirname(char *to, const char *from) {
   DBUG_PRINT("enter", ("from: '%s'", from));
 
   start = buff;
-  from_ptr = (char *)from;
+  from_ptr = from;
 #ifdef FN_DEVCHAR
-  if ((pos = strrchr(from_ptr, FN_DEVCHAR)) != 0) { /* Skip device part */
-    length = (size_t)(pos - from_ptr) + 1;
-    start = my_stpnmov(buff, from_ptr, length);
-    from_ptr += length;
+  {
+    const char *dev_pos = strrchr(from_ptr, FN_DEVCHAR);
+    if (dev_pos != nullptr) { /* Skip device part */
+      size_t length = (dev_pos - from_ptr) + 1;
+      start = my_stpnmov(buff, from_ptr, length);
+      from_ptr += length;
+    }
   }
 #endif
 
   parent[0] = FN_LIBCHAR;
-  length = (size_t)(my_stpcpy(parent + 1, FN_PARENTDIR) - parent);
+  size_t length = my_stpcpy(parent + 1, FN_PARENTDIR) - parent;
   const char *end = start + FN_REFLEN;
   for (pos = start; pos < end && ((*pos = *from_ptr++) != 0); pos++) {
 #ifdef _WIN32
@@ -248,21 +250,21 @@ size_t normalize_dirname(char *to, const char *from) {
 
 size_t unpack_dirname(char *to, const char *from) {
   size_t length, h_length;
-  char buff[FN_REFLEN + 1 + 4], *suffix, *tilde_expansion;
+  char buff[FN_REFLEN + 1 + 4], *suffix;
   DBUG_ENTER("unpack_dirname");
 
   length = normalize_dirname(buff, from);
 
   if (buff[0] == FN_HOMELIB) {
     suffix = buff + 1;
-    tilde_expansion = expand_tilde(&suffix);
-    if (tilde_expansion) {
+    std::string tilde_expansion = expand_tilde(&suffix);
+    if (!tilde_expansion.empty()) {
       length -= (size_t)(suffix - buff) - 1;
-      if (length + (h_length = strlen(tilde_expansion)) <= FN_REFLEN) {
-        if ((h_length > 0) && (tilde_expansion[h_length - 1] == FN_LIBCHAR))
+      if (length + (h_length = tilde_expansion.length()) <= FN_REFLEN) {
+        if ((h_length > 0) && (tilde_expansion.back() == FN_LIBCHAR))
           h_length--;
         memmove(buff + h_length, suffix, length);
-        memmove(buff, tilde_expansion, h_length);
+        memmove(buff, tilde_expansion.c_str(), h_length);
       }
     }
   }
@@ -276,27 +278,27 @@ size_t unpack_dirname(char *to, const char *from) {
   @return home directory.
 */
 
-static char *expand_tilde(char **path) {
-  if (path[0][0] == FN_LIBCHAR) return home_dir; /* ~/ expanded to home */
+static std::string expand_tilde(char **path) {
+  if (path[0][0] == FN_LIBCHAR)
+    return (home_dir ? std::string{home_dir}
+                     : std::string{}); /* ~/ expanded to home */
 
 #ifdef HAVE_GETPWNAM
   {
     char *str, save;
-    struct passwd *user_entry;
 
     if (!(str = strchr(*path, FN_LIBCHAR))) str = strend(*path);
     save = *str;
     *str = '\0';
-    user_entry = getpwnam(*path);
+    PasswdValue user_entry = my_getpwnam(*path);
     *str = save;
-    endpwent();
-    if (user_entry) {
+    if (!user_entry.IsVoid()) {
       *path = str;
-      return user_entry->pw_dir;
+      return user_entry.pw_dir;
     }
   }
 #endif
-  return (char *)0;
+  return std::string{};
 }
 
 /**

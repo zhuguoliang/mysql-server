@@ -160,7 +160,6 @@ RESET PERSIST;
 --echo #
 
 SELECT @@global.binlog_cache_size;
-SELECT @@global.disabled_storage_engines;
 SELECT @@global.collation_database;
 # test SIGNED long value
 SELECT @@global.optimizer_trace_offset;
@@ -176,7 +175,6 @@ SET @@global.binlog_cache_size= 4096;
 # persist default values
 SET @@persist_only.binlog_cache_size= default,
     @@persist_only.collation_database= default,
-    @@persist_only.disabled_storage_engines= default,
     @@persist_only.optimizer_trace_offset= default,
     @@persist_only.optimizer_switch= default,
     @@persist_only.enforce_gtid_consistency= default,
@@ -189,7 +187,6 @@ SELECT * FROM performance_schema.persisted_variables ORDER BY 1;
 
 # must have default values.
 SELECT @@global.binlog_cache_size;
-SELECT @@global.disabled_storage_engines;
 SELECT @@global.collation_database;
 SELECT @@global.optimizer_trace_offset;
 SELECT @@global.optimizer_switch;
@@ -358,6 +355,27 @@ SELECT variable_name FROM performance_schema.variables_info WHERE variable_sourc
 SET GLOBAL innodb_strict_mode=default, innodb_lock_wait_timeout=default,
   myisam_repair_threads=default, myisam_stats_method=default;
 RESET PERSIST;
+
+--echo #
+--echo # Bug #28749668: SKIP_NAME_RESOLVE CAN BE PERSIT_ONLY-ED TO ON, BUT NOT OFF
+--echo #
+
+SELECT @@global.skip_name_resolve;
+CREATE USER 'bug28749668'@'%';
+GRANT ALL ON *.* TO 'bug28749668'@'%';
+--connect(con1, localhost, bug28749668)
+SET PERSIST_ONLY skip_name_resolve=0;
+
+--echo # Restart server and check if server starts
+--source include/restart_mysqld.inc
+
+connection con1;
+SELECT @@global.skip_name_resolve;
+SELECT * FROM performance_schema.persisted_variables;
+RESET PERSIST;
+#cleanup
+DROP USER 'bug28749668'@'%';
+disconnect con1;
 
 --echo # End of the 8.0 tests
 

@@ -1,4 +1,4 @@
-# Copyright (c) 2017, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2017, 2019, Oracle and/or its affiliates. All rights reserved.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
@@ -28,16 +28,6 @@ FILE(GLOB protoc_plugin_SRC
 INCLUDE_DIRECTORIES(
   ${MYSQLX_GENERATE_DIR}
 )
-
-INCLUDE(${MYSQL_CMAKE_SCRIPT_DIR}/compile_flags.cmake)
-
-# Protoc version 2.6.1 generates calls to
-# OSAtomicCompareAndSwap64 and others which are deprecated.
-IF(APPLE)
-  ADD_COMPILE_FLAGS(
-    "${CMAKE_CURRENT_SOURCE_DIR}/message_field_chain.cc"
-    COMPILE_FLAGS "-Wno-deprecated-declarations")
-ENDIF()
 
 ADD_COMPILE_FLAGS(${protoc_plugin_SRC}
   COMPILE_FLAGS "${PUBLIC_XPROTOCOL_FLAGS}"

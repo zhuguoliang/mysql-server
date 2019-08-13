@@ -1,4 +1,4 @@
-/* Copyright (c) 2015, 2018, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2015, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -28,6 +28,7 @@
 #include <mysqld_error.h>
 #include "lex_string.h"
 #include "my_dbug.h"
+#include "my_systime.h"  // my_sleep()
 
 /* Sql_service_interface constructor */
 Sql_service_interface::Sql_service_interface(enum cs_text_or_binary cs_txt_bin,
@@ -168,7 +169,7 @@ long Sql_service_interface::execute_query(std::string sql_string) {
   COM_DATA cmd;
   Sql_resultset rset;
 
-  cmd.com_query.query = (char *)sql_string.c_str();
+  cmd.com_query.query = sql_string.c_str();
   cmd.com_query.length = static_cast<unsigned int>(sql_string.length());
 
   long err = execute_internal(&rset, m_txt_or_bin, m_charset, cmd, COM_QUERY);
@@ -183,7 +184,7 @@ long Sql_service_interface::execute_query(std::string sql_string,
   DBUG_ENTER("Sql_service_interface::execute");
   DBUG_ASSERT(sql_string.length() <= UINT_MAX);
   COM_DATA cmd;
-  cmd.com_query.query = (char *)sql_string.c_str();
+  cmd.com_query.query = sql_string.c_str();
   cmd.com_query.length = static_cast<unsigned int>(sql_string.length());
 
   long err = execute_internal(rset, cs_txt_or_bin, cs_charset, cmd, COM_QUERY);

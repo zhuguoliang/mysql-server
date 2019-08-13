@@ -1,4 +1,4 @@
-/* Copyright (c) 2015, 2018, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2015, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -79,6 +79,7 @@ void thd_init(THD *thd, char *stack_start, bool bound MY_ATTRIBUTE((unused)),
   if (bound) {
     PSI_THREAD_CALL(set_thread_os_id)(psi);
   }
+  PSI_THREAD_CALL(set_thread_THD)(psi, thd);
   thd->set_psi(psi);
 #endif /* HAVE_PSI_THREAD_INTERFACE */
 
@@ -97,7 +98,11 @@ void thd_init(THD *thd, char *stack_start, bool bound MY_ATTRIBUTE((unused)),
 THD *create_thd(bool enable_plugins, bool background_thread, bool bound,
                 PSI_thread_key psi_key) {
   THD *thd = new THD(enable_plugins);
-  if (background_thread) thd->system_thread = SYSTEM_THREAD_BACKGROUND;
+  if (background_thread) {
+    thd->system_thread = SYSTEM_THREAD_BACKGROUND;
+    // Skip grants and set the system_user flag in THD.
+    thd->security_context()->skip_grants();
+  }
   (void)thd_init(thd, reinterpret_cast<char *>(&thd), bound, psi_key);
   return thd;
 }
@@ -261,9 +266,7 @@ int mysql_tmpfile_path(const char *path, const char *prefix) {
                              O_TRUNC | O_SEQUENTIAL |
 #endif /* _WIN32 */
                                  O_CREAT | O_EXCL | O_RDWR,
-                             MYF(MY_WME));
-  if (fd >= 0) unlink(filename);
-
+                             UNLINK_FILE, MYF(MY_WME));
   return fd;
 }
 

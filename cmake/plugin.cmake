@@ -1,4 +1,4 @@
-# Copyright (c) 2009, 2018, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2009, 2019, Oracle and/or its affiliates. All rights reserved.
 # 
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
@@ -57,7 +57,7 @@ ENDMACRO()
 MACRO(MYSQL_ADD_PLUGIN)
   MYSQL_PARSE_ARGUMENTS(ARG
     "LINK_LIBRARIES;DEPENDENCIES;MODULE_OUTPUT_NAME;STATIC_OUTPUT_NAME"
-    "STORAGE_ENGINE;STATIC_ONLY;MODULE_ONLY;CLIENT_ONLY;MANDATORY;DEFAULT;DISABLED;TEST_ONLY;SKIP_INSTALL"
+    "STORAGE_ENGINE;STATIC_ONLY;MODULE_ONLY;CLIENT_ONLY;MANDATORY;DEFAULT;TEST_ONLY;SKIP_INSTALL"
     ${ARGN}
   )
   
@@ -76,13 +76,9 @@ MACRO(MYSQL_ADD_PLUGIN)
     SET(WITH_${plugin} 1)
   ENDIF()
 
-  IF(WITH_MAX_NO_NDB)
-    SET(WITH_MAX 1)
-    SET(WITHOUT_NDBCLUSTER 1)
-  ENDIF()
-
   IF(ARG_DEFAULT)
-    IF(NOT DEFINED WITH_${plugin} AND 
+    IF(NOT DEFINED WITH_${plugin} AND
+       NOT DEFINED WITHOUT_${plugin} AND
        NOT DEFINED WITH_${plugin}_STORAGE_ENGINE)
       SET(WITH_${plugin} 1)
     ENDIF()
@@ -90,25 +86,44 @@ MACRO(MYSQL_ADD_PLUGIN)
   
   IF(WITH_${plugin}_STORAGE_ENGINE 
     OR WITH_{$plugin}
-    OR WITH_ALL 
-    OR WITH_MAX 
     AND NOT WITHOUT_${plugin}_STORAGE_ENGINE
     AND NOT WITHOUT_${plugin}
     AND NOT ARG_MODULE_ONLY)
      
     SET(WITH_${plugin} 1)
-  ELSEIF(WITHOUT_${plugin}_STORAGE_ENGINE OR WITH_NONE OR ${plugin}_DISABLED)
+  ELSEIF(WITHOUT_${plugin}_STORAGE_ENGINE)
     SET(WITHOUT_${plugin} 1)
     SET(WITH_${plugin}_STORAGE_ENGINE 0)
     SET(WITH_${plugin} 0)
   ENDIF()
   
-  
-  IF(ARG_MANDATORY)
-    SET(WITH_${plugin} 1)
+  IF(DEFINED WITH_${plugin} AND DEFINED WITHOUT_${plugin})
+    IF(WITH_${plugin} EQUAL WITHOUT_${plugin})
+      MESSAGE(FATAL_ERROR "WITH_${plugin} == WITHOUT_${plugin}")
+    ENDIF()
   ENDIF()
 
-  
+  IF(DEFINED WITH_${plugin})
+    IF(WITH_${plugin})
+      SET(WITHOUT_${plugin} 0)
+    ELSE()
+      SET(WITHOUT_${plugin} 1)
+    ENDIF()
+  ENDIF()
+
+  IF(DEFINED WITHOUT_${plugin})
+    IF(WITHOUT_${plugin})
+      SET(WITH_${plugin} 0)
+    ELSE()
+      SET(WITH_${plugin} 1)
+    ENDIF()
+  ENDIF()
+
+  IF(ARG_MANDATORY)
+    SET(WITH_${plugin} 1)
+    SET(WITHOUT_${plugin} 0)
+  ENDIF()
+
   IF(ARG_STORAGE_ENGINE)
     SET(with_var "WITH_${plugin}_STORAGE_ENGINE" )
   ELSE()
@@ -121,7 +136,7 @@ MACRO(MYSQL_ADD_PLUGIN)
   SET(BUILD_PLUGIN 1)
   # Build either static library or module
   IF (WITH_${plugin} AND NOT ARG_MODULE_ONLY)
-    ADD_CONVENIENCE_LIBRARY(${target} STATIC ${SOURCES})
+    ADD_LIBRARY(${target} STATIC ${SOURCES})
     SET_TARGET_PROPERTIES(${target}
       PROPERTIES COMPILE_DEFINITIONS "MYSQL_SERVER")
 

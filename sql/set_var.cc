@@ -1,4 +1,4 @@
-/* Copyright (c) 2002, 2018, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2002, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -67,6 +67,7 @@
 #include "sql/table.h"
 #include "sql_string.h"
 
+using std::min;
 using std::string;
 
 static collation_unordered_map<string, sys_var *> *system_variable_hash;
@@ -326,11 +327,11 @@ bool sys_var::update(THD *thd, set_var *var) {
   }
 }
 
-uchar *sys_var::session_value_ptr(THD *, THD *target_thd, LEX_STRING *) {
+const uchar *sys_var::session_value_ptr(THD *, THD *target_thd, LEX_STRING *) {
   return session_var_ptr(target_thd);
 }
 
-uchar *sys_var::global_value_ptr(THD *, LEX_STRING *) {
+const uchar *sys_var::global_value_ptr(THD *, LEX_STRING *) {
   return global_var_ptr();
 }
 
@@ -364,8 +365,8 @@ bool sys_var::check(THD *thd, set_var *var) {
   return false;
 }
 
-uchar *sys_var::value_ptr(THD *running_thd, THD *target_thd, enum_var_type type,
-                          LEX_STRING *base) {
+const uchar *sys_var::value_ptr(THD *running_thd, THD *target_thd,
+                                enum_var_type type, LEX_STRING *base) {
   if (type == OPT_GLOBAL || type == OPT_PERSIST || scope() == GLOBAL) {
     mysql_mutex_assert_owner(&LOCK_global_system_variables);
     AutoRLock lock(guard);
@@ -374,7 +375,8 @@ uchar *sys_var::value_ptr(THD *running_thd, THD *target_thd, enum_var_type type,
     return session_value_ptr(running_thd, target_thd, base);
 }
 
-uchar *sys_var::value_ptr(THD *thd, enum_var_type type, LEX_STRING *base) {
+const uchar *sys_var::value_ptr(THD *thd, enum_var_type type,
+                                LEX_STRING *base) {
   return value_ptr(thd, thd, type, base);
 }
 
@@ -425,14 +427,17 @@ bool sys_var::is_default(THD *, set_var *var) {
 
 void sys_var::set_user_host(THD *thd) {
   memset(user, 0, sizeof(user));
+  DBUG_ASSERT(thd->security_context()->user().length < sizeof(user));
   /* set client user */
-  if (thd->security_context()->user().length)
+  if (thd->security_context()->user().length > 0)
     strncpy(user, thd->security_context()->user().str,
             thd->security_context()->user().length);
   memset(host, 0, sizeof(host));
-  if (thd->security_context()->host().length)
-    strncpy(host, thd->security_context()->host().str,
-            thd->security_context()->host().length);
+  if (thd->security_context()->host().length > 0) {
+    int host_len =
+        min<size_t>(sizeof(host) - 1, thd->security_context()->host().length);
+    strncpy(host, thd->security_context()->host().str, host_len);
+  }
 }
 
 void sys_var::do_deprecated_warning(THD *thd) {
@@ -458,22 +463,25 @@ void sys_var::do_deprecated_warning(THD *thd) {
 
 Item *sys_var::copy_value(THD *thd) {
   LEX_STRING str;
-  uchar *val_ptr = session_value_ptr(thd, thd, &str);
+  const uchar *val_ptr = session_value_ptr(thd, thd, &str);
   switch (get_var_type()) {
     case GET_INT:
-      return new Item_int(*(int *)val_ptr);
+      return new Item_int(*pointer_cast<const int *>(val_ptr));
     case GET_UINT:
-      return new Item_int((ulonglong) * (uint *)val_ptr);
+      return new Item_int(
+          static_cast<ulonglong>(*pointer_cast<const uint *>(val_ptr)));
     case GET_LONG:
-      return new Item_int((longlong) * (long *)val_ptr);
+      return new Item_int(
+          static_cast<longlong>(*pointer_cast<const long *>(val_ptr)));
     case GET_ULONG:
-      return new Item_int((ulonglong) * (ulong *)val_ptr);
+      return new Item_int(
+          static_cast<ulonglong>(*pointer_cast<const ulong *>(val_ptr)));
     case GET_LL:
-      return new Item_int(*(longlong *)val_ptr);
+      return new Item_int(*pointer_cast<const longlong *>(val_ptr));
     case GET_ULL:
-      return new Item_int(*(ulonglong *)val_ptr);
+      return new Item_int(*pointer_cast<const ulonglong *>(val_ptr));
     case GET_BOOL:
-      return new Item_int(*(bool *)val_ptr);
+      return new Item_int(*pointer_cast<const bool *>(val_ptr));
     case GET_ENUM:
     case GET_SET:
     case GET_FLAGSET:
@@ -481,12 +489,13 @@ Item *sys_var::copy_value(THD *thd) {
     case GET_STR:
     case GET_NO_ARG:
     case GET_PASSWORD: {
-      const char *tmp_str_val = (const char *)val_ptr;
+      const char *tmp_str_val = pointer_cast<const char *>(val_ptr);
       return new Item_string(tmp_str_val, strlen(tmp_str_val),
                              system_charset_info);
     }
     case GET_DOUBLE:
-      return new Item_float(*(double *)val_ptr, NOT_FIXED_DEC);
+      return new Item_float(*pointer_cast<const double *>(val_ptr),
+                            NOT_FIXED_DEC);
     default:
       DBUG_ASSERT(0);
   }
@@ -654,7 +663,8 @@ int mysql_del_sys_var_chain(sys_var *first) {
     False if a >= b.
 */
 static int show_cmp(const void *a, const void *b) {
-  return strcmp(((SHOW_VAR *)a)->name, ((SHOW_VAR *)b)->name);
+  return strcmp(static_cast<const SHOW_VAR *>(a)->name,
+                static_cast<const SHOW_VAR *>(b)->name);
 }
 
 /*
@@ -834,7 +844,7 @@ int sql_set_variables(THD *thd, List<set_var_base> *var_list, bool opened) {
     }
   }
 err:
-  free_underlaid_joins(thd->lex->select_lex);
+  free_underlaid_joins(thd, thd->lex->select_lex);
   DBUG_RETURN(error);
 }
 
@@ -1120,11 +1130,11 @@ int set_var::update(THD *thd) {
   return ret;
 }
 
-void set_var::print_short(String *str) {
+void set_var::print_short(const THD *thd, String *str) {
   str->append(var->name.str, var->name.length);
   str->append(STRING_WITH_LEN("="));
   if (value)
-    value->print(str, QT_ORDINARY);
+    value->print(thd, str, QT_ORDINARY);
   else
     str->append(STRING_WITH_LEN("DEFAULT"));
 }
@@ -1132,9 +1142,10 @@ void set_var::print_short(String *str) {
 /**
   Self-print assignment
 
+  @param thd Thread handle
   @param str String buffer to append the partial assignment to.
 */
-void set_var::print(THD *, String *str) {
+void set_var::print(const THD *thd, String *str) {
   switch (type) {
     case OPT_PERSIST:
       str->append("PERSIST ");
@@ -1152,7 +1163,7 @@ void set_var::print(THD *, String *str) {
     str->append(base.str, base.length);
     str->append(STRING_WITH_LEN("."));
   }
-  print_short(str);
+  print_short(thd, str);
 }
 
 /*****************************************************************************
@@ -1208,8 +1219,8 @@ int set_var_user::update(THD *thd) {
   return 0;
 }
 
-void set_var_user::print(THD *, String *str) {
-  user_var_item->print_assignment(str, QT_ORDINARY);
+void set_var_user::print(const THD *thd, String *str) {
+  user_var_item->print_assignment(thd, str, QT_ORDINARY);
 }
 
 /*****************************************************************************
@@ -1255,7 +1266,7 @@ int set_var_password::update(THD *thd) {
              : 0;
 }
 
-void set_var_password::print(THD *thd, String *str) {
+void set_var_password::print(const THD *thd, String *str) {
   if (user->user.str != NULL && user->user.length > 0) {
     str->append(STRING_WITH_LEN("PASSWORD FOR "));
     append_identifier(thd, str, user->user.str, user->user.length);
@@ -1319,7 +1330,7 @@ int set_var_collation_client::update(THD *thd) {
   return 0;
 }
 
-void set_var_collation_client::print(THD *, String *str) {
+void set_var_collation_client::print(const THD *, String *str) {
   str->append((set_cs_flags & SET_CS_NAMES) ? "NAMES " : "CHARACTER SET ");
   if (set_cs_flags & SET_CS_DEFAULT)
     str->append("DEFAULT");

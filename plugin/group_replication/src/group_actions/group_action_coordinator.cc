@@ -1,4 +1,4 @@
-/* Copyright (c) 2018, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2018, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -21,6 +21,7 @@
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 #include "plugin/group_replication/include/group_actions/group_action_coordinator.h"
+#include "plugin/group_replication/include/group_actions/communication_protocol_action.h"
 #include "plugin/group_replication/include/group_actions/multi_primary_migration_action.h"
 #include "plugin/group_replication/include/group_actions/primary_election_action.h"
 #include "plugin/group_replication/include/plugin.h"
@@ -58,6 +59,8 @@ Group_action_information::~Group_action_information() {}
      to true.
   2) It is deleted under the coordinator_process_lock on terminate_action or
      awake_coordinator_on_error
+     If it was proposed locally the code proposing the action will delete the
+     object on coordinate_action_execution.
   3) All accesses are under the execution of the said action on the thread, or
      on the coordination or stop methods, were we use the
      coordinator_process_lock
@@ -493,6 +496,9 @@ bool Group_action_coordinator::handle_action_start_message(
     else if (message_type ==
              Group_action_message::ACTION_PRIMARY_ELECTION_MESSAGE)
       action_info->executing_action = new Primary_election_action();
+    else if (message_type ==
+             Group_action_message::ACTION_SET_COMMUNICATION_PROTOCOL_MESSAGE)
+      action_info->executing_action = new Communication_protocol_action();
   }
   /*
    In the unlikely case a member of a higher version sent an unknown action
@@ -501,6 +507,11 @@ bool Group_action_coordinator::handle_action_start_message(
    method
   */
   if (nullptr == action_info->executing_action) {
+    if (!is_message_sender) {
+      delete action_info->execution_message_area;
+      delete action_info;
+      action_info = nullptr;
+    }
     abort_plugin_process(
         "Fatal error during a Group Replication configuration change: This "
         "member received an unknown action for execution.");
@@ -944,7 +955,7 @@ void Group_action_coordinator::kill_transactions_and_leave() {
   Notification_context ctx;
 
   LogPluginErr(ERROR_LEVEL, ER_GRP_RPL_CONFIGURATION_ACTION_KILLED_ERROR);
-  if (exit_state_action_var != EXIT_STATE_ACTION_ABORT_SERVER) {
+  if (get_exit_state_action_var() != EXIT_STATE_ACTION_ABORT_SERVER) {
     current_executing_action->execution_message_area->append_execution_message(
         " The member will now leave the group.");
   }
@@ -1030,7 +1041,7 @@ void Group_action_coordinator::kill_transactions_and_leave() {
   }
   gcs_module->remove_view_notifer(&view_change_notifier);
 
-  if (exit_state_action_var == EXIT_STATE_ACTION_ABORT_SERVER) {
+  if (get_exit_state_action_var() == EXIT_STATE_ACTION_ABORT_SERVER) {
     std::string error_message(
         "Fatal error during a Group Replication configuration change. ");
     error_message.append(current_executing_action->execution_message_area

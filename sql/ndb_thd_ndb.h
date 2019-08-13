@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2011, 2018, Oracle and/or its affiliates. All rights reserved.
+   Copyright (c) 2011, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -26,18 +26,15 @@
 #define NDB_THD_NDB_H
 
 #include "map_helpers.h"
-#include "my_base.h"          // ha_rows
 #include "sql/ndb_share.h"
-#include "storage/ndb/include/kernel/ndb_limits.h" // MAX_NDB_NODES
-
-/*
-  Place holder for ha_ndbcluster thread specific data
-*/
 
 struct THD_NDB_SHARE;
 class THD;
 
-class Thd_ndb 
+/*
+  Class for ndbcluster thread specific data
+*/
+class Thd_ndb
 {
   THD* const m_thd;
 
@@ -73,7 +70,7 @@ public:
       any DDL operations it performs are not distributed.
     */
     NO_LOG_SCHEMA_OP=  1 << 0,
-    /* 
+    /*
       This Thd_ndb is a participant in a global schema distribution.
       Whenver a GSL lock is required, it is acquired by the coordinator.
       The participant can then assume that the GSL lock is already held
@@ -83,10 +80,23 @@ public:
     IS_SCHEMA_DIST_PARTICIPANT= 1 << 1,
 
     /*
-      Gives special priorites to this Thd_ndb, allowing it to create
-      schema distribution event ops before ndb_schema_dist_is_ready()
+      Allow Thd_ndb to setup schema distribution and apply status
      */
-    ALLOW_BINLOG_SETUP= 1 << 2
+    ALLOW_BINLOG_SETUP= 1 << 2,
+
+    /*
+       Create a ndbcluster util table in DD. The table already exists
+       in NDB and thus some functions need to return early in order to hide
+       the table. This allows using SQL to install the table definition in DD.
+    */
+    CREATE_UTIL_TABLE = 1 << 3,
+
+    /*
+       Mark the util table as hidden when installing the table definition
+       in DD. By marking the table as hidden it will not be available for either
+       DML or DDL.
+    */
+    CREATE_UTIL_TABLE_HIDDEN = 1 << 4
   };
 
   // Check if given option is set
@@ -174,9 +184,9 @@ public:
 
   /** This is the number of NdbQueryDef objects that the handler has created.*/
   uint m_pushed_queries_defined;
-  /** 
-    This is the number of cases where the handler decided not to use an 
-    NdbQuery object that it previously created for executing a particular 
+  /**
+    This is the number of cases where the handler decided not to use an
+    NdbQuery object that it previously created for executing a particular
     instance of a query fragment. This may happen if for examle the optimizer
     decides to use another type of access operation than originally assumed.
   */
@@ -189,13 +199,23 @@ public:
   uint m_pushed_queries_executed;
   /**
     This is the number of lookup operations (via unique index or primary key)
-    that were eliminated by pushing linked operations (NdbQuery) to the data 
+    that were eliminated by pushing linked operations (NdbQuery) to the data
     nodes.
    */
   uint m_pushed_reads;
 
-  uint m_transaction_no_hint_count[MAX_NDB_NODES];
-  uint m_transaction_hint_count[MAX_NDB_NODES];
+  /**
+    The number of hinted transactions started by this thread. Using hinted
+    transaction is normally more efficient as it tries to select a transaction
+    coordinator close to the data, in most cases on the node where the primary
+    replica of the data resides.
+  */
+ private:
+  uint m_hinted_trans_count{0};
+
+ public:
+  void increment_hinted_trans_count() { m_hinted_trans_count++; }
+  uint hinted_trans_count() const { return m_hinted_trans_count; }
 
   NdbTransaction *global_schema_lock_trans;
   uint global_schema_lock_count;

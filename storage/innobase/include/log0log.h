@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2018, Oracle and/or its affiliates. All rights reserved.
+Copyright (c) 1995, 2019, Oracle and/or its affiliates. All rights reserved.
 Copyright (c) 2009, Google Inc.
 
 Portions of this file contain modifications contributed and copyrighted by
@@ -215,6 +215,9 @@ the checkpoint fields when we make new checkpoints. This field is only
 defined in the first log file. */
 constexpr uint32_t LOG_CHECKPOINT_1 = OS_FILE_LOG_BLOCK_SIZE;
 
+/** Log Encryption information in redo log header. */
+constexpr uint32_t LOG_ENCRYPTION = 2 * OS_FILE_LOG_BLOCK_SIZE;
+
 /** Second checkpoint field in the header of the first log file. */
 constexpr uint32_t LOG_CHECKPOINT_2 = 3 * OS_FILE_LOG_BLOCK_SIZE;
 
@@ -355,6 +358,9 @@ constexpr uint32_t MLOG_TEST_MAX_REC_LEN = 100;
 
 /** Maximum number of MLOG_TEST records in single group of log records. */
 constexpr uint32_t MLOG_TEST_GROUP_MAX_REC_N = 100;
+
+/** Bytes consumed by MLOG_TEST record with an empty payload. */
+constexpr uint32_t MLOG_TEST_REC_OVERHEAD = 37;
 
 /** Redo log system (singleton). */
 extern log_t *log_sys;
@@ -795,10 +801,8 @@ redo log file header.
 @return true if success. */
 bool log_rotate_encryption();
 
-/** Try to enable the redo log encryption if it's set.
-It will try to enable the redo log encryption and write the metadata to
-redo log file header if the innodb_undo_log_encrypt is ON. */
-void log_enable_encryption_if_set();
+/** Rotate default master key for redo log encryption. */
+void redo_rotate_default_master_key();
 
 /** Requests a sharp checkpoint write for provided or greater lsn.
 @param[in,out]	log	redo log
@@ -969,11 +973,14 @@ Hence the proper order of calls looks like this:
 bool log_sys_init(uint32_t n_files, uint64_t file_size, space_id_t space_id);
 
 /** Starts the initialized redo log system using a provided
-checkpoint_lsn and current lsn.
-@param[in,out]	log		redo log
-@param[in]	checkpoint_no	checkpoint no (sequential number)
-@param[in]	checkpoint_lsn	checkpoint lsn
-@param[in]	start_lsn	current lsn to start at */
+checkpoint_lsn and current lsn. Block for current_lsn must
+be properly initialized in the log buffer prior to calling
+this function. Therefore a proper value of first_rec_group
+must be set for that block before log_start is called.
+@param[in,out]  log             redo log
+@param[in]      checkpoint_no	  checkpoint no (sequential number)
+@param[in]      checkpoint_lsn  checkpoint lsn
+@param[in]      start_lsn       current lsn to start at */
 void log_start(log_t &log, checkpoint_no_t checkpoint_no, lsn_t checkpoint_lsn,
                lsn_t start_lsn);
 
@@ -1015,8 +1022,12 @@ to start log background threads in such case.
 @param[in,out]	log	redo log */
 void log_stop_background_threads(log_t &log);
 
-/** @return true iff log threads are started */
-bool log_threads_active(const log_t &log);
+/** Marks the flag which tells log threads to stop and wakes them.
+Does not wait until they are stopped. */
+void log_stop_background_threads_nowait(log_t &log);
+
+/** Wakes up all log threads which are alive. */
+void log_wake_threads(log_t &log);
 
 /** Free the log system data structures. Deallocate all the related memory. */
 void log_sys_close();
@@ -1058,16 +1069,15 @@ void log_checkpointer(log_t *log_ptr);
 
 #define log_checkpointer_mutex_exit(log) mutex_exit(&((log).checkpointer_mutex))
 
-#define log_checkpointer_mutex_own(log)      \
-  (mutex_own(&((log).checkpointer_mutex)) || \
-   !(log).checkpointer_thread_alive.load())
+#define log_checkpointer_mutex_own(log) \
+  (mutex_own(&((log).checkpointer_mutex)) || !log_checkpointer_is_active())
 
 #define log_closer_mutex_enter(log) mutex_enter(&((log).closer_mutex))
 
 #define log_closer_mutex_exit(log) mutex_exit(&((log).closer_mutex))
 
 #define log_closer_mutex_own(log) \
-  (mutex_own(&((log).closer_mutex)) || !(log).closer_thread_alive.load())
+  (mutex_own(&((log).closer_mutex)) || !log_closer_is_active())
 
 #define log_flusher_mutex_enter(log) mutex_enter(&((log).flusher_mutex))
 
@@ -1077,7 +1087,7 @@ void log_checkpointer(log_t *log_ptr);
 #define log_flusher_mutex_exit(log) mutex_exit(&((log).flusher_mutex))
 
 #define log_flusher_mutex_own(log) \
-  (mutex_own(&((log).flusher_mutex)) || !(log).flusher_thread_alive.load())
+  (mutex_own(&((log).flusher_mutex)) || !log_flusher_is_active())
 
 #define log_flush_notifier_mutex_enter(log) \
   mutex_enter(&((log).flush_notifier_mutex))
@@ -1085,9 +1095,8 @@ void log_checkpointer(log_t *log_ptr);
 #define log_flush_notifier_mutex_exit(log) \
   mutex_exit(&((log).flush_notifier_mutex))
 
-#define log_flush_notifier_mutex_own(log)      \
-  (mutex_own(&((log).flush_notifier_mutex)) || \
-   !(log).flush_notifier_thread_alive.load())
+#define log_flush_notifier_mutex_own(log) \
+  (mutex_own(&((log).flush_notifier_mutex)) || !log_flush_notifier_is_active())
 
 #define log_writer_mutex_enter(log) mutex_enter(&((log).writer_mutex))
 
@@ -1097,7 +1106,7 @@ void log_checkpointer(log_t *log_ptr);
 #define log_writer_mutex_exit(log) mutex_exit(&((log).writer_mutex))
 
 #define log_writer_mutex_own(log) \
-  (mutex_own(&((log).writer_mutex)) || !(log).writer_thread_alive.load())
+  (mutex_own(&((log).writer_mutex)) || !log_writer_is_active())
 
 #define log_write_notifier_mutex_enter(log) \
   mutex_enter(&((log).write_notifier_mutex))
@@ -1105,9 +1114,8 @@ void log_checkpointer(log_t *log_ptr);
 #define log_write_notifier_mutex_exit(log) \
   mutex_exit(&((log).write_notifier_mutex))
 
-#define log_write_notifier_mutex_own(log)      \
-  (mutex_own(&((log).write_notifier_mutex)) || \
-   !(log).write_notifier_thread_alive.load())
+#define log_write_notifier_mutex_own(log) \
+  (mutex_own(&((log).write_notifier_mutex)) || !log_write_notifier_is_active())
 
 #define LOG_SYNC_POINT(a)                \
   do {                                   \
@@ -1133,6 +1141,39 @@ void log_position_unlock(log_t &log);
 @param[out]	checkpoint_lsn	stores checkpoint lsn there */
 void log_position_collect_lsn_info(const log_t &log, lsn_t *current_lsn,
                                    lsn_t *checkpoint_lsn);
+
+/** Checks if log writer thread is active.
+@return true if and only if the log writer thread is active */
+inline bool log_writer_is_active();
+
+/** Checks if log write notifier thread is active.
+@return true if and only if the log write notifier thread is active */
+inline bool log_write_notifier_is_active();
+
+/** Checks if log flusher thread is active.
+@return true if and only if the log flusher thread is active */
+inline bool log_flusher_is_active();
+
+/** Checks if log flush notifier thread is active.
+@return true if and only if the log flush notifier thread is active */
+inline bool log_flush_notifier_is_active();
+
+/** Checks if log closer thread is active.
+@return true if and only if the log closer thread is active */
+inline bool log_closer_is_active();
+
+/** Checks if log checkpointer thread is active.
+@return true if and only if the log checkpointer thread is active */
+inline bool log_checkpointer_is_active();
+
+/** Writes encryption information to log header.
+@param[in,out]  buf          log file header
+@param[in]      key          encryption key
+@param[in]      iv           encryption iv
+@param[in]      is_boot      if it's for bootstrap
+@param[in]      encrypt_key  encrypt with master key */
+bool log_file_header_fill_encryption(byte *buf, byte *key, byte *iv,
+                                     bool is_boot, bool encrypt_key);
 
 #else /* !UNIV_HOTBACKUP */
 

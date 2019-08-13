@@ -231,13 +231,13 @@ SELECT @@innodb_temp_tablespaces_dir;
 # Create a new connection.
 SET SESSION DEBUG='+d,ibt_pool_exhausted';
 CREATE TEMPORARY TABLE t1 (a INT);
-ERROR HY000: Unable to allocate temporary tablespace for this session
+ERROR HY000: Storage engine could not allocate temporary tablespace for this session.
 SET SESSION DEBUG='-d,ibt_pool_exhausted';
 CREATE TABLE t3(a INT, b BLOB);
 INSERT INTO t3 VALUES (1, 'hi'), (2, 'hello');
 SET SESSION DEBUG='+d,ibt_pool_exhausted';
 INSERT INTO t3 SELECT * FROM t3;
-ERROR HY000: Unable to allocate temporary tablespace for this session
+ERROR HY000: Storage engine could not allocate temporary tablespace for this session.
 SET SESSION DEBUG='-d,ibt_pool_exhausted';
 # Create Workload and execute queries involving intrinsic tables.
 explain format = json select a from t1 group by b order by sum(a);
@@ -306,7 +306,7 @@ explain format = json select b, count(a), sum(a), avg(a), std(a),
 min(a), max(a), bit_and(a), bit_or(a) from t1 group by b;
 select b, count(a), sum(a), avg(a), std(a), min(a),
 max(a), bit_and(a), bit_or(a) from t1 group by b;
-select sql_big_result * from performance_schema.global_variables where variable_name like 'internal_tmp_disk_storage_engine';
+select sql_big_result * from performance_schema.global_variables where variable_name like 'internal_tmp_mem_storage_engine';
 select 1 union distinct select 1 union all select 1;
 select alias1.`col_int_key` AS field1 from (t8 as alias1) where (5) in
 (select 7 union select 1) order by alias1.`col_varchar_key` asc;

@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+   Copyright (c) 2017, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -36,6 +36,7 @@
 #include "sql/dd/types/schema.h"
 #include "sql/mdl.h"            // MDL_*
 #include "sql/ndb_dd_disk_data.h"
+#include "sql/ndb_dd_schema.h"
 #include "sql/ndb_dd_sdi.h"
 #include "sql/ndb_dd_table.h"
 #include "sql/ndb_dd_upgrade_table.h"
@@ -118,14 +119,41 @@ Ndb_dd_client::mdl_lock_table(const char* schema_name,
 }
 
 
+/**
+  Acquire MDL locks for the Schema.
+
+  @param schema_name          Schema name.
+  @param exclusive_lock       If true, acquire exclusive locks on the Schema
+                              for updating it. If false, acquire the default
+                              intention_exclusive lock.
+
+  @return true        On success.
+  @return false       On failure
+*/
 bool
-Ndb_dd_client::mdl_lock_schema(const char* schema_name)
+Ndb_dd_client::mdl_lock_schema(const char* schema_name, bool exclusive_lock)
 {
   MDL_request_list mdl_requests;
   MDL_request schema_request;
-  MDL_REQUEST_INIT(&schema_request,
-                   MDL_key::SCHEMA, schema_name, "", MDL_INTENTION_EXCLUSIVE,
-                   MDL_EXPLICIT);
+  MDL_request backup_lock_request;
+  MDL_request grl_request;
+
+  // By default acquire MDL_INTENTION_EXCLUSIVE lock on Schema
+  enum_mdl_type schema_lock_type = MDL_INTENTION_EXCLUSIVE;
+
+  if (exclusive_lock) {
+    // exclusive lock has been requested
+    schema_lock_type = MDL_EXCLUSIVE;
+    // Also acquire the backup and global locks
+    MDL_REQUEST_INIT(&backup_lock_request, MDL_key::BACKUP_LOCK, "", "",
+                     MDL_INTENTION_EXCLUSIVE, MDL_EXPLICIT);
+    MDL_REQUEST_INIT(&grl_request, MDL_key::GLOBAL, "", "",
+                     MDL_INTENTION_EXCLUSIVE, MDL_EXPLICIT);
+    mdl_requests.push_front(&backup_lock_request);
+    mdl_requests.push_front(&grl_request);
+  }
+  MDL_REQUEST_INIT(&schema_request, MDL_key::SCHEMA, schema_name, "",
+                   schema_lock_type, MDL_EXPLICIT);
   mdl_requests.push_front(&schema_request);
 
   if (m_thd->mdl_context.acquire_locks(&mdl_requests,
@@ -134,14 +162,18 @@ Ndb_dd_client::mdl_lock_schema(const char* schema_name)
     return false;
   }
 
-  // Remember ticket of the acquired mdl lock
+  // Remember ticket(s) of the acquired mdl lock
   m_acquired_mdl_tickets.push_back(schema_request.ticket);
+  if (exclusive_lock) {
+    m_acquired_mdl_tickets.push_back(backup_lock_request.ticket);
+    m_acquired_mdl_tickets.push_back(grl_request.ticket);
+  }
 
   return true;
 }
 
 bool
-Ndb_dd_client::mdl_lock_logfile_group(const char* logfile_group_name)
+Ndb_dd_client::mdl_lock_logfile_group_exclusive(const char* logfile_group_name)
 {
   MDL_request_list mdl_requests;
   MDL_request logfile_group_request;
@@ -183,7 +215,35 @@ Ndb_dd_client::mdl_lock_logfile_group(const char* logfile_group_name)
 
 
 bool
-Ndb_dd_client::mdl_lock_tablespace(const char* tablespace_name)
+Ndb_dd_client::mdl_lock_logfile_group(const char* logfile_group_name,
+                                      bool intention_exclusive)
+{
+  MDL_request_list mdl_requests;
+  MDL_request logfile_group_request;
+
+  enum_mdl_type mdl_type = intention_exclusive ? MDL_INTENTION_EXCLUSIVE :
+                           MDL_SHARED_READ;
+  MDL_REQUEST_INIT(&logfile_group_request,
+                   MDL_key::TABLESPACE, "", logfile_group_name,
+                   mdl_type, MDL_EXPLICIT);
+
+  mdl_requests.push_front(&logfile_group_request);
+
+  if (m_thd->mdl_context.acquire_locks(&mdl_requests,
+                                       m_thd->variables.lock_wait_timeout))
+  {
+    return false;
+  }
+
+  // Remember tickets of the acquired mdl locks
+  m_acquired_mdl_tickets.push_back(logfile_group_request.ticket);
+
+  return true;
+}
+
+
+bool
+Ndb_dd_client::mdl_lock_tablespace_exclusive(const char* tablespace_name)
 {
   MDL_request_list mdl_requests;
   MDL_request tablespace_request;
@@ -219,6 +279,34 @@ Ndb_dd_client::mdl_lock_tablespace(const char* tablespace_name)
   m_acquired_mdl_tickets.push_back(tablespace_request.ticket);
   m_acquired_mdl_tickets.push_back(backup_lock_request.ticket);
   m_acquired_mdl_tickets.push_back(grl_request.ticket);
+
+  return true;
+}
+
+
+bool
+Ndb_dd_client::mdl_lock_tablespace(const char* tablespace_name,
+                                   bool intention_exclusive)
+{
+  MDL_request_list mdl_requests;
+  MDL_request tablespace_request;
+
+  enum_mdl_type mdl_type = intention_exclusive ? MDL_INTENTION_EXCLUSIVE :
+                           MDL_SHARED_READ;
+  MDL_REQUEST_INIT(&tablespace_request,
+                   MDL_key::TABLESPACE, "", tablespace_name,
+                   mdl_type, MDL_EXPLICIT);
+
+  mdl_requests.push_front(&tablespace_request);
+
+  if (m_thd->mdl_context.acquire_locks(&mdl_requests,
+                                       m_thd->variables.lock_wait_timeout))
+  {
+    return false;
+  }
+
+  // Remember tickets of the acquired mdl locks
+  m_acquired_mdl_tickets.push_back(tablespace_request.ticket);
 
   return true;
 }
@@ -547,6 +635,7 @@ Ndb_dd_client::install_table(const char* schema_name, const char* table_name,
                              const dd::sdi_t& sdi,
                              int ndb_table_id, int ndb_table_version,
                              size_t ndb_num_partitions,
+                             const std::string &tablespace_name,
                              bool force_overwrite,
                              Ndb_referenced_tables_invalidator *invalidator)
 {
@@ -600,6 +689,17 @@ Ndb_dd_client::install_table(const char* schema_name, const char* table_name,
   {
     ndb_dd_table_fix_partition_count(install_table.get(),
                                      ndb_num_partitions);
+  }
+
+  // Set the tablespace id if applicable
+  if (!tablespace_name.empty())
+  {
+    dd::Object_id tablespace_id;
+    if (!lookup_tablespace_id(tablespace_name.c_str(), &tablespace_id))
+    {
+      return false;
+    }
+    ndb_dd_table_set_tablespace_id(install_table.get(), tablespace_id);
   }
 
   const dd::Table *existing= nullptr;
@@ -726,6 +826,52 @@ Ndb_dd_client::get_table(const char *schema_name, const char *table_name,
 
 
 bool
+Ndb_dd_client::set_tablespace_id_in_table(const char *schema_name,
+                                          const char *table_name,
+                                          dd::Object_id tablespace_id)
+{
+  dd::Table *table_def = nullptr;
+  if (m_client->acquire_for_modification(schema_name, table_name, &table_def))
+  {
+    return false;
+  }
+  if (table_def == nullptr)
+  {
+    DBUG_ASSERT(false);
+    return false;
+  }
+
+  ndb_dd_table_set_tablespace_id(table_def, tablespace_id);
+
+  if (m_client->update(table_def))
+  {
+    return false;
+  }
+  return true;
+}
+
+
+bool
+Ndb_dd_client::fetch_all_schemas(
+    std::map<std::string, const dd::Schema*> &schemas) {
+  DBUG_ENTER("Ndb_dd_client::fetch_all_schemas");
+
+  std::vector<const dd::Schema*> schemas_list;
+  if (m_client->fetch_global_components(&schemas_list))
+  {
+    DBUG_PRINT("error", ("Failed to fetch all schemas"));
+    DBUG_RETURN(false);
+  }
+
+  for (const dd::Schema* schema : schemas_list)
+  {
+    schemas.insert(std::make_pair(schema->name().c_str(), schema));
+  }
+  DBUG_RETURN(true);
+}
+
+
+bool
 Ndb_dd_client::fetch_schema_names(std::vector<std::string>* names)
 {
   DBUG_ENTER("Ndb_dd_client::fetch_schema_names");
@@ -754,6 +900,12 @@ Ndb_dd_client::get_ndb_table_names_in_schema(const char* schema_name,
   if (m_client->acquire(schema_name, &schema))
   {
     // Failed to open the requested Schema object
+    DBUG_RETURN(false);
+  }
+
+  if (schema == nullptr)
+  {
+    // Database does not exist
     DBUG_RETURN(false);
   }
 
@@ -865,6 +1017,41 @@ Ndb_dd_client::schema_exists(const char* schema_name,
 }
 
 
+bool
+Ndb_dd_client::update_schema_version(const char* schema_name,
+                                     unsigned int counter,
+                                     unsigned int node_id)
+{
+  DBUG_ENTER("Ndb_dd_client::update_schema_version");
+  DBUG_PRINT("enter", ("Schema : %s, counter : %u, node_id : %u",
+                       schema_name, counter, node_id));
+
+  DBUG_ASSERT(m_thd->mdl_context.owns_equal_or_stronger_lock(
+              MDL_key::SCHEMA, schema_name, "", MDL_EXCLUSIVE));
+
+  dd::Schema *schema;
+
+  if (m_client->acquire_for_modification(schema_name, &schema) ||
+      schema == nullptr)
+  {
+    DBUG_PRINT("error", ("Failed to fetch the Schema object"));
+    DBUG_RETURN(false);
+  }
+
+  // Set the values
+  ndb_dd_schema_set_counter_and_nodeid(schema, counter, node_id);
+
+  // Update Schema in DD
+  if (m_client->update(schema))
+  {
+    DBUG_PRINT("error", ("Failed to update the Schema in DD"));
+    DBUG_RETURN(false);
+  }
+
+  DBUG_RETURN(true);
+}
+
+
 bool Ndb_dd_client::lookup_tablespace_id(const char* tablespace_name,
                                          dd::Object_id* tablespace_id)
 {
@@ -909,6 +1096,29 @@ Ndb_dd_client::get_tablespace(const char *tablespace_name,
 }
 
 
+bool
+Ndb_dd_client::tablespace_exists(const char* tablespace_name, bool& exists)
+{
+  const dd::Tablespace* tablespace;
+  if (m_client->acquire(tablespace_name, &tablespace))
+  {
+    // Failed to acquire the requested tablespace
+    return false;
+  }
+
+  if (tablespace == nullptr)
+  {
+    // The tablespace doesn't exist
+    exists = false;
+    return true;
+  }
+
+  // The tablespace exists
+  exists = true;
+  return true;
+}
+
+
 bool Ndb_dd_client::fetch_ndb_tablespace_names(
     std::unordered_set<std::string>& names)
 {
@@ -940,7 +1150,8 @@ bool Ndb_dd_client::fetch_ndb_tablespace_names(
     }
 
     // Acquire lock in DD
-    if (!mdl_lock_tablespace(tablespace->name().c_str()))
+    if (!mdl_lock_tablespace(tablespace->name().c_str(),
+                             false /* intention_exclusive */))
     {
       // Failed to acquire MDL lock
       DBUG_RETURN(false);
@@ -962,12 +1173,28 @@ Ndb_dd_client::install_tablespace(const char* tablespace_name,
 {
   DBUG_ENTER("Ndb_dd_client::install_tablespace");
 
-  if (force_overwrite)
+  bool exists;
+  if (!tablespace_exists(tablespace_name, exists))
   {
-    if (!drop_tablespace(tablespace_name))
+    // Could not detect if the tablespace exists or not
+    DBUG_RETURN(false);
+  }
+
+  if (exists)
+  {
+    if (force_overwrite)
     {
-      DBUG_ASSERT(false);
-      return false;
+      if (!drop_tablespace(tablespace_name))
+      {
+        // Failed to drop tablespace
+        DBUG_RETURN(false);
+      }
+    }
+    else
+    {
+      // Error since tablespace exists but force_overwrite not set by caller
+      // No point continuing since the subsequent store() will fail
+      DBUG_RETURN(false);
     }
   }
 
@@ -1008,12 +1235,13 @@ Ndb_dd_client::install_tablespace(const char* tablespace_name,
 
 
 bool
-Ndb_dd_client::drop_tablespace(const char* tablespace_name)
+Ndb_dd_client::drop_tablespace(const char* tablespace_name,
+                               bool fail_if_not_exists)
 
 {
   DBUG_ENTER("Ndb_dd_client::drop_tablespace");
 
-  const dd::Tablespace *existing= nullptr;
+  const dd::Tablespace *existing = nullptr;
   if (m_client->acquire(tablespace_name, &existing))
   {
     DBUG_RETURN(false);
@@ -1022,7 +1250,11 @@ Ndb_dd_client::drop_tablespace(const char* tablespace_name)
   if (existing == nullptr)
   {
     // Tablespace does not exist
-    DBUG_RETURN(false);
+    if (fail_if_not_exists)
+    {
+      DBUG_RETURN(false);
+    }
+    DBUG_RETURN(true);
   }
 
   if (m_client->drop(existing))
@@ -1042,6 +1274,30 @@ Ndb_dd_client::get_logfile_group(const char *logfile_group_name,
   {
     return false;
   }
+  return true;
+}
+
+
+bool
+Ndb_dd_client::logfile_group_exists(const char* logfile_group_name,
+                                    bool& exists)
+{
+  const dd::Tablespace* logfile_group;
+  if (m_client->acquire(logfile_group_name, &logfile_group))
+  {
+    // Failed to acquire the requested logfile group
+    return false;
+  }
+
+  if (logfile_group == nullptr)
+  {
+    // The logfile group doesn't exist
+    exists = false;
+    return true;
+  }
+
+  // The logfile group exists
+  exists = true;
   return true;
 }
 
@@ -1077,7 +1333,8 @@ bool Ndb_dd_client::fetch_ndb_logfile_group_names(
     }
 
     // Acquire lock in DD
-    if (!mdl_lock_logfile_group(tablespace->name().c_str()))
+    if (!mdl_lock_logfile_group(tablespace->name().c_str(),
+                                false /* intention_exclusive */))
     {
       // Failed to acquire MDL lock
       DBUG_RETURN(false);
@@ -1108,12 +1365,28 @@ Ndb_dd_client::install_logfile_group(const char* logfile_group_name,
    * logfile groups in terms of metadata structure
    */
 
-  if (force_overwrite)
+  bool exists;
+  if (!logfile_group_exists(logfile_group_name, exists))
   {
-    if (!drop_logfile_group(logfile_group_name))
+    // Could not detect if the logfile group exists or not
+    DBUG_RETURN(false);
+  }
+
+  if (exists)
+  {
+    if (force_overwrite)
     {
-      DBUG_ASSERT(false);
-      return false;
+      if (!drop_logfile_group(logfile_group_name))
+      {
+        // Failed to drop logfile group
+        DBUG_RETURN(false);
+      }
+    }
+    else
+    {
+      // Error since logfile group exists but force_overwrite not set to true by
+      // caller. No point continuing since the subsequent store() will fail
+      DBUG_RETURN(false);
     }
   }
 
@@ -1180,8 +1453,8 @@ Ndb_dd_client::install_undo_file(const char* logfile_group_name,
 }
 
 bool
-Ndb_dd_client::drop_logfile_group(const char* logfile_group_name)
-
+Ndb_dd_client::drop_logfile_group(const char* logfile_group_name,
+                                  bool fail_if_not_exists)
 {
   DBUG_ENTER("Ndb_dd_client::drop_logfile_group");
 
@@ -1194,7 +1467,7 @@ Ndb_dd_client::drop_logfile_group(const char* logfile_group_name)
    * logfile groups in terms of metadata structure
    */
 
-  const dd::Tablespace *existing= nullptr;
+  const dd::Tablespace *existing = nullptr;
   if (m_client->acquire(logfile_group_name, &existing))
   {
     DBUG_RETURN(false);
@@ -1203,7 +1476,11 @@ Ndb_dd_client::drop_logfile_group(const char* logfile_group_name)
   if (existing == nullptr)
   {
     // Logfile group does not exist
-    DBUG_RETURN(false);
+    if (fail_if_not_exists)
+    {
+      DBUG_RETURN(false);
+    }
+    DBUG_RETURN(true);
   }
 
   if (m_client->drop(existing))

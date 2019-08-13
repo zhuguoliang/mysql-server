@@ -1,4 +1,4 @@
-/* Copyright (c) 2000, 2018, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2000, 2019, Oracle and/or its affiliates. All rights reserved.
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
@@ -59,6 +59,7 @@
 #include "sql/auth/auth_common.h"
 #include "sql/auth/dynamic_privilege_table.h"
 #include "sql/auth/sql_security_ctx.h"
+#include "sql/debug_sync.h"  // DEBUG_SYNC
 #include "sql/field.h"
 #include "sql/handler.h"
 #include "sql/item.h"
@@ -142,12 +143,17 @@ bool check_change_password(THD *thd, const char *host, const char *user,
       my_error(ER_MUST_CHANGE_PASSWORD, MYF(0));
       return true;
     }
-    if (check_access(thd, UPDATE_ACL, "mysql", NULL, NULL, 1, 0)) return (1);
+    if (check_access(thd, UPDATE_ACL, consts::mysql.c_str(), NULL, NULL, 1, 0))
+      return (true);
+
+    if (sctx->can_operate_with({user, host}, consts::system_user))
+      return (true);
   }
 
   if (retain_current_password) {
-    if (check_access(thd, UPDATE_ACL, "mysql", NULL, NULL, 1, 1) &&
-        !(sctx->check_access(CREATE_USER_ACL)) &&
+    if (check_access(thd, UPDATE_ACL, consts::mysql.c_str(), NULL, NULL, 1,
+                     1) &&
+        !(sctx->check_access(CREATE_USER_ACL, consts::mysql)) &&
         !(sctx->has_global_grant(STRING_WITH_LEN("APPLICATION_PASSWORD_ADMIN"))
               .first)) {
       my_error(ER_SPECIFIC_ACCESS_DENIED_ERROR, MYF(0),
@@ -186,7 +192,8 @@ bool mysql_show_create_user(THD *thd, LEX_USER *user_name,
   USER_RESOURCES tmp_user_resource;
   enum SSL_type ssl_type;
   char *ssl_cipher, *x509_issuer, *x509_subject;
-  char buff[256];
+  static const int COMMAND_BUFFER_LENGTH = 2048;
+  char buff[COMMAND_BUFFER_LENGTH];
   Item_string *field = NULL;
   List<Item> field_list;
   String sql_text(buff, sizeof(buff), system_charset_info);
@@ -198,8 +205,8 @@ bool mysql_show_create_user(THD *thd, LEX_USER *user_name,
   DBUG_ENTER("mysql_show_create_user");
   if (are_both_users_same) {
     TABLE_LIST t1;
-    t1.init_one_table(C_STRING_WITH_LEN("mysql"), C_STRING_WITH_LEN("user"),
-                      "user", TL_READ);
+    t1.init_one_table(STRING_WITH_LEN("mysql"), STRING_WITH_LEN("user"), "user",
+                      TL_READ);
     hide_password_hash =
         check_table_access(thd, SELECT_ACL, &t1, false, UINT_MAX, true);
   }
@@ -324,7 +331,8 @@ bool mysql_show_create_user(THD *thd, LEX_USER *user_name,
   }
   lex->users_list.push_back(user_name);
   {
-    Show_user_params show_user_params(hide_password_hash);
+    Show_user_params show_user_params(
+        hide_password_hash, thd->variables.print_identified_with_as_hex);
     mysql_rewrite_acl_query(thd, Consumer_type::STDOUT, &show_user_params,
                             false);
     sql_text.takeover(thd->rewritten_query);
@@ -771,7 +779,8 @@ static bool validate_password_require_current(THD *thd, LEX_USER *Str,
         Current password is valid plain text password with len > 0.
         Erase that in memory. We don't need it any further
      */
-      memset((char *)(Str->current_auth.str), 0, Str->current_auth.length);
+      memset(const_cast<char *>(Str->current_auth.str), 0,
+             Str->current_auth.length);
     } else if (!is_privileged_user) {
       /*
         If the field value is set or field value is NULL and global sys
@@ -829,6 +838,8 @@ bool set_and_validate_user_attributes(
 
   what_to_set.m_what = NONE_ATTR;
   what_to_set.m_user_attributes = acl_table::USER_ATTRIBUTE_NONE;
+  DBUG_ASSERT(assert_acl_cache_read_lock(thd) ||
+              assert_acl_cache_write_lock(thd));
 
   if (history_check_done) *history_check_done = false;
   /* update plugin,auth str attributes */
@@ -849,15 +860,6 @@ bool set_and_validate_user_attributes(
 
   /* copy password expire attributes to individual user */
   Str->alter_status = thd->lex->alter_password;
-
-  if (command == SQLCOM_GRANT || command == SQLCOM_REVOKE) {
-    what_to_set.m_what = NONE_ATTR;
-    if (command == SQLCOM_GRANT && !user_exists) {
-      my_error(ER_CANT_CREATE_USER_WITH_GRANT, MYF(0));
-      return true;
-    }
-    return false;
-  }
 
   mysql_mutex_lock(&LOCK_password_history);
   Str->alter_status.password_history_length =
@@ -963,6 +965,20 @@ bool set_and_validate_user_attributes(
         }
         break;
       }
+      /*
+        We need to fill in the elements of the LEX_USER structure even for GRANT
+        and REVOKE.
+      */
+      case SQLCOM_GRANT:
+        /* fall through */
+      case SQLCOM_REVOKE:
+        what_to_set.m_what = NONE_ATTR;
+        Str->plugin = acl_user->plugin;
+        Str->auth.str = acl_user->credentials[PRIMARY_CRED].m_auth_string.str;
+        Str->auth.length =
+            acl_user->credentials[PRIMARY_CRED].m_auth_string.length;
+        break;
+
       default: {
         /*
           If we are here, authentication related information can be provided
@@ -1019,6 +1035,11 @@ bool set_and_validate_user_attributes(
     /* set default plugin for new users if not specified */
     if (!Str->uses_identified_with_clause)
       Str->plugin = default_auth_plugin_name;
+
+    if (command == SQLCOM_GRANT) {
+      my_error(ER_CANT_CREATE_USER_WITH_GRANT, MYF(0));
+      return true;
+    }
   }
 
   optimize_plugin_compare_by_pointer(&Str->plugin);
@@ -1151,7 +1172,7 @@ bool set_and_validate_user_attributes(
       password = const_cast<char *>("");
     /* erase in memory copy of plain text password */
     if (Str->auth.length > 0)
-      memset((char *)(Str->auth.str), 0, Str->auth.length);
+      memset(const_cast<char *>(Str->auth.str), 0, Str->auth.length);
     /* Use the authentication_string field as password */
     Str->auth.str = password;
     Str->auth.length = buflen;
@@ -1159,7 +1180,8 @@ bool set_and_validate_user_attributes(
   }
 
   /* Check iff the REPLACE clause is specified correctly for the user */
-  if (validate_password_require_current(thd, Str, acl_user, auth,
+  if ((what_to_set.m_what & PLUGIN_ATTR) &&
+      validate_password_require_current(thd, Str, acl_user, auth,
                                         is_privileged_user, user_exists)) {
     plugin_unlock(0, plugin);
     what_to_set.m_what = NONE_ATTR;
@@ -1178,7 +1200,7 @@ bool set_and_validate_user_attributes(
     */
     DBUG_ASSERT(!is_role);
     st_mysql_auth *auth = (st_mysql_auth *)plugin_decl(plugin)->info;
-    if (auth->validate_authentication_string((char *)Str->auth.str,
+    if (auth->validate_authentication_string(const_cast<char *>(Str->auth.str),
                                              (unsigned)Str->auth.length)) {
       my_error(ER_PASSWORD_FORMAT, MYF(0));
       plugin_unlock(0, plugin);
@@ -1299,6 +1321,7 @@ bool change_password(THD *thd, LEX_USER *lex_user, char *new_password,
   std::string authentication_plugin;
   bool is_role;
   int ret;
+  sql_mode_t old_sql_mode = thd->variables.sql_mode;
 
   DBUG_ENTER("change_password");
   DBUG_ASSERT(lex_user && lex_user->host.str);
@@ -1388,7 +1411,11 @@ bool change_password(THD *thd, LEX_USER *lex_user, char *new_password,
   // We must not have user with plain text password at this point
   thd->lex->contains_plaintext_password = false;
   authentication_plugin.assign(combo->plugin.str);
+
+  thd->variables.sql_mode &= ~MODE_PAD_CHAR_TO_FULL_LENGTH;
   ret = replace_user_table(thd, table, combo, 0, false, false, what_to_set);
+  thd->variables.sql_mode = old_sql_mode;
+
   if (ret) {
     result = 1;
     goto end;
@@ -1405,8 +1432,10 @@ bool change_password(THD *thd, LEX_USER *lex_user, char *new_password,
   users.insert(combo);
 
 end:
+
+  User_params user_params(&users);
   commit_result = log_and_commit_acl_ddl(thd, transactional_tables, &users,
-                                         false, !result, false);
+                                         &user_params, false, !result, false);
 
   mysql_audit_notify(
       thd, AUDIT_EVENT(MYSQL_AUDIT_AUTHENTICATION_CREDENTIAL_CHANGE),
@@ -1483,6 +1512,7 @@ bool rename_matching_grants(T *hash, Matcher &matches, LEX_USER *user_to) {
   @param drop       If user_from is to be dropped.
   @param user_from  The the user to be searched/dropped/renamed.
   @param user_to    The new name for the user if to be renamed, NULL otherwise.
+  @param on_drop_role_priv  true enabled by the DROP ROLE privilege
 
   @note
     Scan through all elements in an in-memory grant structure and apply
@@ -1504,7 +1534,8 @@ bool rename_matching_grants(T *hash, Matcher &matches, LEX_USER *user_to) {
 */
 
 static int handle_grant_struct(enum enum_acl_lists struct_no, bool drop,
-                               LEX_USER *user_from, LEX_USER *user_to) {
+                               LEX_USER *user_from, LEX_USER *user_to,
+                               bool on_drop_role_priv) {
   DBUG_ENTER("handle_grant_struct");
   DBUG_PRINT("info", ("scan struct: %u  search: '%s'@'%s'", struct_no,
                       user_from->user.str, user_from->host.str));
@@ -1529,6 +1560,15 @@ static int handle_grant_struct(enum enum_acl_lists struct_no, bool drop,
         if (!matches(acl_user->user, acl_user->host.get_host())) continue;
 
         if (drop) {
+          // if we're dropping roles and the account is not locked (not a role)
+          // bail off
+          if (on_drop_role_priv && !acl_user->account_locked) {
+            char command[128];
+            get_privilege_desc(command, sizeof(command), CREATE_USER_ACL);
+            my_error(ER_SPECIFIC_ACCESS_DENIED_ERROR, MYF(0), command);
+            DBUG_RETURN(-1);
+          }
+          acl_restrictions->remove_restrictions(acl_user);
           acl_users->erase(idx);
           rebuild_cached_acl_users_for_name();
           /*
@@ -1642,6 +1682,7 @@ static int handle_grant_struct(enum enum_acl_lists struct_no, bool drop,
     @param  user_from           The the user to be searched/dropped/renamed.
     @param  user_to             The new name for the user if to be renamed,
                                 NULL otherwise.
+    @param  on_drop_role_priv   Enabled via the DROP ROLE privilege
 
   @note
     Go through all grant tables and in-memory grant structures and apply
@@ -1657,7 +1698,8 @@ static int handle_grant_struct(enum enum_acl_lists struct_no, bool drop,
 */
 
 static int handle_grant_data(THD *thd, TABLE_LIST *tables, bool drop,
-                             LEX_USER *user_from, LEX_USER *user_to) {
+                             LEX_USER *user_from, LEX_USER *user_to,
+                             bool on_drop_role_priv) {
   int result = 0;
   int found;
   int ret;
@@ -1689,7 +1731,8 @@ static int handle_grant_data(THD *thd, TABLE_LIST *tables, bool drop,
     DBUG_RETURN(-1);
   } else {
     /* Handle user array. */
-    if ((ret = handle_grant_struct(USER_ACL, drop, user_from, user_to) > 0) ||
+    if ((ret = handle_grant_struct(USER_ACL, drop, user_from, user_to,
+                                   on_drop_role_priv)) > 0 ||
         found) {
       result = 1; /* At least one record/element found. */
       /* If search is requested, we do not need to search further. */
@@ -1707,7 +1750,8 @@ static int handle_grant_data(THD *thd, TABLE_LIST *tables, bool drop,
     DBUG_RETURN(-1);
   } else {
     /* Handle db array. */
-    if ((((ret = handle_grant_struct(DB_ACL, drop, user_from, user_to) > 0) &&
+    if ((((ret = handle_grant_struct(DB_ACL, drop, user_from, user_to,
+                                     on_drop_role_priv)) > 0 &&
           !result) ||
          found) &&
         !result) {
@@ -1733,7 +1777,7 @@ static int handle_grant_data(THD *thd, TABLE_LIST *tables, bool drop,
   } else {
     /* Handle procs array. */
     if ((((ret = handle_grant_struct(PROC_PRIVILEGES_HASH, drop, user_from,
-                                     user_to) > 0) &&
+                                     user_to, on_drop_role_priv)) > 0 &&
           !result) ||
          found) &&
         !result) {
@@ -1746,7 +1790,7 @@ static int handle_grant_data(THD *thd, TABLE_LIST *tables, bool drop,
     }
     /* Handle funcs array. */
     if ((((ret = handle_grant_struct(FUNC_PRIVILEGES_HASH, drop, user_from,
-                                     user_to) > 0) &&
+                                     user_to, on_drop_role_priv)) > 0 &&
           !result) ||
          found) &&
         !result) {
@@ -1789,7 +1833,7 @@ static int handle_grant_data(THD *thd, TABLE_LIST *tables, bool drop,
     } else {
       /* Handle columns hash. */
       if ((((ret = handle_grant_struct(COLUMN_PRIVILEGES_HASH, drop, user_from,
-                                       user_to) > 0) &&
+                                       user_to, on_drop_role_priv)) > 0 &&
             !result) ||
            found) &&
           !result)
@@ -1818,8 +1862,8 @@ static int handle_grant_data(THD *thd, TABLE_LIST *tables, bool drop,
       DBUG_RETURN(-1);
     } else {
       /* Handle proxies_priv array. */
-      if (((ret = handle_grant_struct(PROXY_USERS_ACL, drop, user_from,
-                                      user_to) > 0) &&
+      if (((ret = handle_grant_struct(PROXY_USERS_ACL, drop, user_from, user_to,
+                                      on_drop_role_priv)) > 0 &&
            !result) ||
           found)
         result = 1; /* At least one record/element found. */
@@ -1869,6 +1913,7 @@ bool mysql_create_user(THD *thd, List<LEX_USER> &list, bool if_not_exists,
   DBUG_ENTER("mysql_create_user");
 
   Acl_cache_lock_guard acl_cache_lock(thd, Acl_cache_lock_mode::WRITE_MODE);
+
   /*
     This statement will be replicated as a statement, even when using
     row-based replication.  The binlog state will be cleared here to
@@ -1882,6 +1927,11 @@ bool mysql_create_user(THD *thd, List<LEX_USER> &list, bool if_not_exists,
     DBUG_RETURN(result != 1);
 
   if (!acl_cache_lock.lock()) {
+    commit_and_close_mysql_tables(thd);
+    DBUG_RETURN(true);
+  }
+
+  if (check_system_user_privilege(thd, list)) {
     commit_and_close_mysql_tables(thd);
     DBUG_RETURN(true);
   }
@@ -1923,7 +1973,7 @@ bool mysql_create_user(THD *thd, List<LEX_USER> &list, bool if_not_exists,
     TABLE *history_tbl = tables[ACL_TABLES::TABLE_PASSWORD_HISTORY].table;
     if (history_check_done)
       tables[ACL_TABLES::TABLE_PASSWORD_HISTORY].table = NULL;
-    ret = handle_grant_data(thd, tables, 0, user_name, NULL);
+    ret = handle_grant_data(thd, tables, 0, user_name, NULL, false);
     if (history_check_done)
       tables[ACL_TABLES::TABLE_PASSWORD_HISTORY].table = history_tbl;
     if (ret) {
@@ -2027,11 +2077,21 @@ bool mysql_create_user(THD *thd, List<LEX_USER> &list, bool if_not_exists,
              is_anonymous_user ? "anonymous user" : wrong_users.c_ptr_safe());
   }
 
-  result = log_and_commit_acl_ddl(thd, transactional_tables, &extra_users);
+  User_params user_params(&extra_users);
+  result = log_and_commit_acl_ddl(thd, transactional_tables, &extra_users,
+                                  &user_params);
 
   {
     if (!result) {
       LEX_USER *reset_user;
+      /*
+        reset_mqh() first acquires lock on user connection hash.
+        Then it may try and lock ACL caches. Other callers like
+        FLUSH PRIVILEGES may be contending for locks too. So,
+        we unlock ACL caches here.
+      */
+      acl_cache_lock.unlock();
+      DEBUG_SYNC(thd, "before_reset_mqh_in_create_user");
       for (LEX_USER *one_user : reset_users)
         if ((reset_user = get_current_user(thd, one_user))) {
           reset_mqh(thd, reset_user, 0);
@@ -2042,20 +2102,20 @@ bool mysql_create_user(THD *thd, List<LEX_USER> &list, bool if_not_exists,
   DBUG_RETURN(result);
 }
 
-/*
+/**
   Drop a list of users and all their privileges.
 
-  SYNOPSIS
-    mysql_drop_user()
-    thd                         The current thread.
-    list                        The users to drop.
+  @param thd                         The current thread.
+  @param list                        The users to drop.
+  @param if_exists                   The if exists flag
+  @param on_drop_role_priv           enabled by the DROP ROLE privilege
 
-  RETURN
-    false       OK.
-    true       Error.
+  @retval false      OK
+  @retval true       Error
 */
 
-bool mysql_drop_user(THD *thd, List<LEX_USER> &list, bool if_exists) {
+bool mysql_drop_user(THD *thd, List<LEX_USER> &list, bool if_exists,
+                     bool on_drop_role_priv) {
   int result = 0;
   String wrong_users;
   LEX_USER *user_name, *tmp_user_name;
@@ -2075,6 +2135,7 @@ bool mysql_drop_user(THD *thd, List<LEX_USER> &list, bool if_exists) {
   std::vector<Role_id> mandatory_roles;
 
   Acl_cache_lock_guard acl_cache_lock(thd, Acl_cache_lock_mode::WRITE_MODE);
+
   /*
     This statement will be replicated as a statement, even when using
     row-based replication.  The binlog state will be cleared here to
@@ -2088,6 +2149,11 @@ bool mysql_drop_user(THD *thd, List<LEX_USER> &list, bool if_exists) {
     DBUG_RETURN(result != 1);
 
   if (!acl_cache_lock.lock()) {
+    commit_and_close_mysql_tables(thd);
+    DBUG_RETURN(true);
+  }
+
+  if (check_system_user_privilege(thd, list)) {
     commit_and_close_mysql_tables(thd);
     DBUG_RETURN(true);
   }
@@ -2117,7 +2183,8 @@ bool mysql_drop_user(THD *thd, List<LEX_USER> &list, bool if_exists) {
 
     audit_users.insert(tmp_user_name);
 
-    int ret = handle_grant_data(thd, tables, 1, user_name, NULL);
+    int ret =
+        handle_grant_data(thd, tables, 1, user_name, NULL, on_drop_role_priv);
     if (ret <= 0) {
       if (ret < 0) {
         result = 1;
@@ -2194,11 +2261,14 @@ bool mysql_rename_user(THD *thd, List<LEX_USER> &list) {
   LEX_USER *user_to, *tmp_user_to;
   List_iterator<LEX_USER> user_list(list);
   TABLE_LIST tables[ACL_TABLES::LAST_ENTRY];
+  std::unique_ptr<Security_context> orig_sctx = nullptr;
   bool transactional_tables;
   DBUG_ENTER("mysql_rename_user");
 
   Acl_cache_lock_guard acl_cache_lock(thd, Acl_cache_lock_mode::WRITE_MODE);
   if (!acl_cache_lock.lock()) DBUG_RETURN(true);
+
+  if (check_system_user_privilege(thd, list)) DBUG_RETURN(true);
 
   /* Is this auth id a role id? */
   {
@@ -2253,7 +2323,7 @@ bool mysql_rename_user(THD *thd, List<LEX_USER> &list) {
       Search all in-memory structures and grant tables
       for a mention of the new user name.
     */
-    int ret = handle_grant_data(thd, tables, 0, user_to, NULL);
+    int ret = handle_grant_data(thd, tables, 0, user_to, NULL, false);
 
     if (ret != 0) {
       if (ret < 0) {
@@ -2266,7 +2336,7 @@ bool mysql_rename_user(THD *thd, List<LEX_USER> &list) {
       continue;
     }
 
-    ret = handle_grant_data(thd, tables, 0, user_from, user_to);
+    ret = handle_grant_data(thd, tables, 0, user_from, user_to, false);
 
     if (ret <= 0) {
       if (ret < 0) {
@@ -2289,6 +2359,15 @@ bool mysql_rename_user(THD *thd, List<LEX_USER> &list) {
     roles_rename_authid(thd, tables[ACL_TABLES::TABLE_ROLE_EDGES].table,
                         tables[ACL_TABLES::TABLE_DEFAULT_ROLES].table,
                         user_from, user_to);
+    /* Update the security context if user renames self */
+    if (do_update_sctx(thd->security_context(), user_from)) {
+      /* Keep a copy of original security context if not done already */
+      if (orig_sctx == nullptr) {
+        orig_sctx = std::make_unique<Security_context>();
+        *(orig_sctx.get()) = *(thd->security_context());
+      }
+      update_sctx(thd->security_context(), tmp_user_to);
+    }
   }
 
   /* Rebuild 'acl_check_hosts' since 'acl_users' has been modified */
@@ -2302,7 +2381,18 @@ bool mysql_rename_user(THD *thd, List<LEX_USER> &list) {
     result =
         populate_roles_caches(thd, (tables + ACL_TABLES::TABLE_ROLE_EDGES));
 
+  /*
+    Restore the orignal security context temporarily because binlog must
+    write the original definer/invoker in the binlog in order for slave
+    to work
+  */
+  Security_context *current_sctx = thd->security_context();
+  current_sctx->restore_security_context(thd, orig_sctx.get());
+
   result = log_and_commit_acl_ddl(thd, transactional_tables);
+
+  /* Restore the updated security context */
+  current_sctx->restore_security_context(thd, current_sctx);
 
   {
     /* Notify audit plugin. We will ignore the return value. */
@@ -2356,6 +2446,7 @@ bool mysql_alter_user(THD *thd, List<LEX_USER> &list, bool if_exists) {
   DBUG_ENTER("mysql_alter_user");
 
   Acl_cache_lock_guard acl_cache_lock(thd, Acl_cache_lock_mode::WRITE_MODE);
+
   /*
     This statement will be replicated as a statement, even when using
     row-based replication.  The binlog state will be cleared here to
@@ -2368,6 +2459,11 @@ bool mysql_alter_user(THD *thd, List<LEX_USER> &list, bool if_exists) {
     DBUG_RETURN(result != 1);
 
   if (!acl_cache_lock.lock()) {
+    commit_and_close_mysql_tables(thd);
+    DBUG_RETURN(true);
+  }
+
+  if (check_system_user_privilege(thd, list)) {
     commit_and_close_mysql_tables(thd);
     DBUG_RETURN(true);
   }
@@ -2429,7 +2525,7 @@ bool mysql_alter_user(THD *thd, List<LEX_USER> &list, bool if_exists) {
       history_tbl = tables[ACL_TABLES::TABLE_PASSWORD_HISTORY].table;
       tables[ACL_TABLES::TABLE_PASSWORD_HISTORY].table = NULL;
     }
-    ret = handle_grant_data(thd, tables, false, user_from, NULL);
+    ret = handle_grant_data(thd, tables, false, user_from, NULL, false);
 
     /* purge the password history if plugin is different */
     if ((what_to_alter.m_what & DIFFERENT_PLUGIN_ATTR) &&
@@ -2529,7 +2625,9 @@ bool mysql_alter_user(THD *thd, List<LEX_USER> &list, bool if_exists) {
       my_error(ER_CANNOT_USER, MYF(0), "ALTER USER", wrong_users.c_ptr_safe());
   }
 
-  result = log_and_commit_acl_ddl(thd, transactional_tables, &extra_users);
+  User_params user_params(&extra_users);
+  result = log_and_commit_acl_ddl(thd, transactional_tables, &extra_users,
+                                  &user_params);
   {
     /* Notify audit plugin. We will ignore the return value. */
     LEX_USER *audit_user;
@@ -2543,6 +2641,14 @@ bool mysql_alter_user(THD *thd, List<LEX_USER> &list, bool if_exists) {
 
     if (!result) {
       LEX_USER *extra_user;
+      /*
+        reset_mqh() first acquires lock on user connection hash.
+        Then it may try and lock ACL caches. Other callers like
+        FLUSH PRIVILEGES may be contending for locks too. So,
+        we unlock ACL caches here.
+      */
+      acl_cache_lock.unlock();
+      DEBUG_SYNC(thd, "before_reset_mqh_in_alter_user");
       for (LEX_USER *one_user : reset_users) {
         if ((extra_user = get_current_user(thd, one_user))) {
           reset_mqh(thd, extra_user, 0);

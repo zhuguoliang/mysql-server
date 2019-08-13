@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+   Copyright (c) 2017, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -25,10 +25,13 @@
 #ifndef NDB_DD_TABLE_H
 #define NDB_DD_TABLE_H
 
+#include <my_inttypes.h>  // ulong
+
 #include "sql/dd/string_type.h"
 
 namespace dd {
   class Table;
+  typedef unsigned long long Object_id;
 }
 
 
@@ -99,5 +102,25 @@ bool ndb_dd_table_check_partition_count(const dd::Table* table_def,
 */
 void ndb_dd_table_fix_partition_count(dd::Table* table_def,
                                       size_t ndb_num_partitions);
+
+/*
+  Save the previous mysql version of the table. Applicable only for tables that
+  have been upgraded
+*/
+void ndb_dd_table_set_previous_mysql_version(dd::Table* table_def,
+                                             ulong previous_mysql_version);
+
+/*
+  Return the previous mysql version of the table. Returns false if
+  previous_mysql_version is not set or invalid, true on success
+*/
+bool ndb_dd_table_get_previous_mysql_version(const dd::Table* table_def,
+                                             ulong& previous_mysql_version);
+
+/*
+  Set tablespace id for the table
+*/
+void ndb_dd_table_set_tablespace_id(dd::Table *table_def,
+                                    dd::Object_id tablespace_id);
 
 #endif

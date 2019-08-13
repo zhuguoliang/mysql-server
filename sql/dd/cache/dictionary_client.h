@@ -1,4 +1,4 @@
-/* Copyright (c) 2015, 2018, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2015, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -374,6 +374,10 @@ class Dictionary_client {
     m_registry_uncommitted.get(
         static_cast<const typename T::Cache_partition *>(object), &element);
     DBUG_ASSERT(element == nullptr);
+
+    // We must require a top level non-default releaser to ensure a
+    // predictable life span of the objects.
+    DBUG_ASSERT(m_current_releaser != &m_default_releaser);
 #endif
 
     m_uncached_objects.push_back(object);
@@ -834,6 +838,23 @@ class Dictionary_client {
                                 const String_type &foreign_key_name,
                                 bool *exists)
       MY_ATTRIBUTE((warn_unused_result));
+
+  /**
+    Check if schema contains check constraint with specified name.
+
+    @param        schema            Schema containing the check constraint.
+    @param        check_cons_name   Name of the check constraint.
+    @param  [out] exists            Set to true if check constraint with
+                                    the name provided exists in the
+                                    schema, false otherwise.
+
+    @retval      false    No error.
+    @retval      true     Error.
+  */
+
+  bool check_constraint_exists(const Schema &schema,
+                               const String_type &check_cons_name,
+                               bool *exists);
 
   /**
     Fetch the names of the components in the schema. Hidden components are

@@ -1,4 +1,4 @@
-/* Copyright (c) 2002, 2017, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2002, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -205,21 +205,22 @@ size_t sp_pcontext::diff_cursors(const sp_pcontext *ctx, bool exclusive) const {
   return 0;  // Didn't find ctx
 }
 
-sp_variable *sp_pcontext::find_variable(LEX_STRING name,
+sp_variable *sp_pcontext::find_variable(const char *name, size_t name_len,
                                         bool current_scope_only) const {
   size_t i = m_vars.size() - m_pboundary;
 
   while (i--) {
     sp_variable *p = m_vars.at(i);
 
-    if (my_strnncoll(system_charset_info, (const uchar *)name.str, name.length,
-                     (const uchar *)p->name.str, p->name.length) == 0) {
+    if (my_strnncoll(system_charset_info, pointer_cast<const uchar *>(name),
+                     name_len, pointer_cast<const uchar *>(p->name.str),
+                     p->name.length) == 0) {
       return p;
     }
   }
 
   return (!current_scope_only && m_parent)
-             ? m_parent->find_variable(name, false)
+             ? m_parent->find_variable(name, name_len, false)
              : NULL;
 }
 

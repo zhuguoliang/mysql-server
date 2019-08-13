@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2018, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 1995, 2019, Oracle and/or its affiliates. All Rights Reserved.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
@@ -260,6 +260,7 @@ enum latch_level_t {
   SYNC_LOG_CHECKPOINTER,
   SYNC_LOG_SN,
   SYNC_PAGE_ARCH,
+  SYNC_PAGE_ARCH_CLIENT,
   SYNC_LOG_ARCH,
 
   SYNC_PAGE_CLEANER,
@@ -338,7 +339,8 @@ enum latch_level_t {
 };
 
 /** Each latch has an ID. This id is used for creating the latch and to look
-up its meta-data. See sync0debug.c. */
+up its meta-data. See sync0debug.c. The order does not matter here, but
+alphabetical ordering seems useful */
 enum latch_id_t {
   LATCH_ID_NONE = 0,
   LATCH_ID_AUTOINC,
@@ -377,6 +379,7 @@ enum latch_id_t {
   LATCH_ID_LOG_ARCH,
   LATCH_ID_PAGE_ARCH,
   LATCH_ID_PAGE_ARCH_OPER,
+  LATCH_ID_PAGE_ARCH_CLIENT,
   LATCH_ID_PERSIST_METADATA_BUFFER,
   LATCH_ID_DICT_PERSIST_DIRTY_TABLES,
   LATCH_ID_PERSIST_AUTOINC,
@@ -449,6 +452,9 @@ enum latch_id_t {
   LATCH_ID_CLONE_SYS,
   LATCH_ID_CLONE_TASK,
   LATCH_ID_CLONE_SNAPSHOT,
+  LATCH_ID_PARALLEL_READ,
+  LATCH_ID_REDO_LOG_ARCHIVE_ADMIN_MUTEX,
+  LATCH_ID_REDO_LOG_ARCHIVE_QUEUE_MUTEX,
   LATCH_ID_TEST_MUTEX,
   LATCH_ID_MAX = LATCH_ID_TEST_MUTEX
 };

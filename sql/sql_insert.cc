@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2000, 2018, Oracle and/or its affiliates. All rights reserved.
+   Copyright (c) 2000, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -33,7 +33,6 @@
 #include <map>
 #include <utility>
 
-#include "binary_log_types.h"
 #include "lex_string.h"
 #include "m_ctype.h"
 #include "m_string.h"
@@ -152,7 +151,6 @@ static bool check_single_table_insert(List<Item> &fields, TABLE_LIST *view,
   @param thd          The current thread.
   @param table_list   The table for insert.
   @param fields       The insert fields.
-  @param check_unique If true, report error if duplicate column names specified.
 
   @return false if success, true if error
 
@@ -160,7 +158,7 @@ static bool check_single_table_insert(List<Item> &fields, TABLE_LIST *view,
 */
 
 static bool check_insert_fields(THD *thd, TABLE_LIST *table_list,
-                                List<Item> &fields, bool check_unique) {
+                                List<Item> &fields) {
   LEX *const lex = thd->lex;
 
 #ifndef DBUG_OFF
@@ -189,8 +187,6 @@ static bool check_insert_fields(THD *thd, TABLE_LIST *table_list,
     Name_resolution_context *context = &select_lex->context;
     Name_resolution_context_state ctx_state;
 
-    thd->dup_field = 0;
-
     /* Save the state of the current name resolution context. */
     ctx_state.save_state(context, table_list);
 
@@ -217,8 +213,22 @@ static bool check_insert_fields(THD *thd, TABLE_LIST *table_list,
       lex->insert_table_leaf = table_list;
     }
 
-    if (check_unique && thd->dup_field) {
-      my_error(ER_FIELD_SPECIFIED_TWICE, MYF(0), thd->dup_field->field_name);
+    // We currently don't check for unique columns when inserting via a view.
+    const bool check_unique = !table_list->is_view();
+
+    if (check_unique && bitmap_bits_set(table->write_set) < fields.elements) {
+      for (auto i = fields.cbegin(); i != fields.cend(); ++i) {
+        // Skipping views means that we only have FIELD_ITEM.
+        const Item &item1 = *i;
+        for (auto j = std::next(i); j != fields.cend(); ++j) {
+          const Item &item2 = *j;
+          if (item1.eq(&item2, true)) {
+            my_error(ER_FIELD_SPECIFIED_TWICE, MYF(0), item1.item_name.ptr());
+            break;
+          }
+        }
+      }
+      DBUG_ASSERT(thd->is_error());
       return true;
     }
   }
@@ -317,7 +327,7 @@ void prepare_triggers_for_insert_stmt(THD *thd, TABLE *table) {
         subject table and therefore might need delete to be done
         immediately. So we turn-off the batching.
       */
-      (void)table->file->extra(HA_EXTRA_DELETE_CANNOT_BATCH);
+      (void)table->file->ha_extra(HA_EXTRA_DELETE_CANNOT_BATCH);
     }
     if (table->triggers->has_triggers(TRG_EVENT_UPDATE, TRG_ACTION_AFTER)) {
       /*
@@ -325,7 +335,7 @@ void prepare_triggers_for_insert_stmt(THD *thd, TABLE *table) {
         table and therefore might need update to be done immediately.
         So we turn-off the batching.
       */
-      (void)table->file->extra(HA_EXTRA_UPDATE_CANNOT_BATCH);
+      (void)table->file->ha_extra(HA_EXTRA_UPDATE_CANNOT_BATCH);
     }
   }
   table->mark_columns_needed_for_insert(thd);
@@ -478,7 +488,7 @@ bool Sql_cmd_insert_values::execute_inner(THD *thd) {
     DEBUG_SYNC(thd, "planned_single_insert");
 
     if (lex->is_explain()) {
-      bool err = explain_single_table_modification(thd, &plan, select_lex);
+      bool err = explain_single_table_modification(thd, thd, &plan, select_lex);
       DBUG_RETURN(err);
     }
 
@@ -498,9 +508,9 @@ bool Sql_cmd_insert_values::execute_inner(THD *thd) {
     if (duplicates == DUP_REPLACE &&
         (!insert_table->triggers ||
          !insert_table->triggers->has_delete_triggers()))
-      insert_table->file->extra(HA_EXTRA_WRITE_CAN_REPLACE);
+      insert_table->file->ha_extra(HA_EXTRA_WRITE_CAN_REPLACE);
     if (duplicates == DUP_UPDATE)
-      insert_table->file->extra(HA_EXTRA_INSERT_WITH_UPDATE);
+      insert_table->file->ha_extra(HA_EXTRA_INSERT_WITH_UPDATE);
     /*
       let's *try* to start bulk inserts. It won't necessary
       start them as insert_many_values.elements should be greater than
@@ -514,7 +524,7 @@ bool Sql_cmd_insert_values::execute_inner(THD *thd) {
       the code to make the call of end_bulk_insert() below safe.
     */
     if (duplicates != DUP_ERROR || lex->is_ignore())
-      insert_table->file->extra(HA_EXTRA_IGNORE_DUP_KEY);
+      insert_table->file->ha_extra(HA_EXTRA_IGNORE_DUP_KEY);
     /*
        This is a simple check for the case when the table has a trigger
        that reads from it, or when the statement invokes a stored function
@@ -574,24 +584,7 @@ bool Sql_cmd_insert_values::execute_inner(THD *thd) {
           break;
         }
       } else {
-        if (lex->used_tables)  // Column used in values()
-          restore_record(insert_table, s->default_values);  // Get empty record
-        else {
-          TABLE_SHARE *share = insert_table->s;
-
-          /*
-            Fix delete marker. No need to restore rest of record since it will
-            be overwritten by fill_record() anyway (and fill_record() does not
-            use default values in this case).
-          */
-          insert_table->record[0][0] = share->default_values[0];
-
-          /* Fix undefined null_bits. */
-          if (share->null_bytes > 1 && share->last_null_bit_pos) {
-            insert_table->record[0][share->null_bytes - 1] =
-                share->default_values[share->null_bytes - 1];
-          }
-        }
+        restore_record(insert_table, s->default_values);  // Get empty record
         if (fill_record_n_invoke_before_triggers(
                 thd, insert_table->field, *values, insert_table,
                 TRG_EVENT_INSERT, insert_table->s->fields)) {
@@ -599,6 +592,15 @@ bool Sql_cmd_insert_values::execute_inner(THD *thd) {
           has_error = true;
           break;
         }
+      }
+
+      if (invoke_table_check_constraints(thd, insert_table)) {
+        if (thd->is_error()) {
+          has_error = true;
+          break;
+        }
+        // continue when IGNORE clause is used.
+        continue;
       }
 
       const int check_result = table_list->view_check_option(thd);
@@ -1096,8 +1098,7 @@ bool Sql_cmd_insert_base::prepare_inner(THD *thd) {
 
   // Prepare the lists of columns and values in the statement.
 
-  if (check_insert_fields(thd, table_list, insert_field_list,
-                          !insert_into_view))
+  if (check_insert_fields(thd, table_list, insert_field_list))
     DBUG_RETURN(true);
 
   TABLE *const insert_table = lex->insert_table_leaf->table;
@@ -1400,8 +1401,6 @@ bool Sql_cmd_insert_base::prepare_inner(THD *thd) {
         and we must now add them on row by row basis.
 
         Check the first INSERT value.
-        Do not fail here, since that would break MyISAM behavior of inserting
-        all rows before the failing row.
 
         PRUNE_DEFAULTS means the partitioning fields are only set to DEFAULT
         values, so we only need to check the first INSERT value, since all the
@@ -1409,15 +1408,17 @@ bool Sql_cmd_insert_base::prepare_inner(THD *thd) {
       */
       if (insert_table->part_info->set_used_partition(
               insert_field_list, *values, info, prune_needs_default_values,
-              &used_partitions))
+              &used_partitions)) {
         can_prune_partitions = partition_info::PRUNE_NO;
+        // set_used_partition may fail.
+        if (thd->is_error()) DBUG_RETURN(true);
+      }
 
       while ((values = its++)) {
         counter++;
 
         /*
-          To make it possible to increase concurrency on table level locking
-          engines such as MyISAM, we check pruning for each row until we will
+          We check pruning for each row until we will
           use all partitions, Even if the number of rows is much higher than the
           number of partitions.
           TODO: Cache the calculated part_id and reuse in
@@ -1426,8 +1427,11 @@ bool Sql_cmd_insert_base::prepare_inner(THD *thd) {
         if (can_prune_partitions == partition_info::PRUNE_YES) {
           if (insert_table->part_info->set_used_partition(
                   insert_field_list, *values, info, prune_needs_default_values,
-                  &used_partitions))
+                  &used_partitions)) {
             can_prune_partitions = partition_info::PRUNE_NO;
+            // set_used_partition may fail.
+            if (thd->is_error()) DBUG_RETURN(true);
+          }
           if (!(counter % num_partitions)) {
             /*
               Check if we using all partitions in table after adding partition
@@ -1513,8 +1517,10 @@ bool Sql_cmd_insert_base::resolve_update_expressions(THD *thd) {
     Item *item;
 
     while ((item = li++)) {
-      item->transform(&Item::update_value_transformer,
-                      pointer_cast<uchar *>(select));
+      Item *new_item = item->transform(&Item::update_value_transformer,
+                                       pointer_cast<uchar *>(select));
+      if (new_item == nullptr) DBUG_RETURN(true);
+      if (new_item != item) thd->change_item_tree((Item **)li.ref(), new_item);
     }
   }
 
@@ -1678,6 +1684,15 @@ bool write_record(THD *thd, TABLE *table, COPY_INFO *info, COPY_INFO *update) {
             goto err;
           }
         }
+        /*
+          If we convert INSERT operation internally to an UPDATE.
+          An INSERT operation may update table->vfield for BLOB fields,
+          So here we recalculate data for generated columns.
+        */
+        if (table->vfield) {
+          update_generated_write_fields(table->write_set, table);
+        }
+
         key_copy((uchar *)key, table->record[0], table->key_info + key_nr, 0);
         if ((error = (table->file->ha_index_read_idx_map(
                  table->record[1], key_nr, (uchar *)key, HA_WHOLE_KEY,
@@ -1742,6 +1757,11 @@ bool write_record(THD *thd, TABLE *table, COPY_INFO *info, COPY_INFO *update) {
 
         if (!insert_id_consumed)
           table->file->restore_auto_increment(prev_insert_id);
+
+        if (invoke_table_check_constraints(thd, table)) {
+          if (thd->is_error()) goto before_trg_err;
+          goto ok_or_after_trg_err;  // return false when IGNORE clause is used
+        }
 
         /* CHECK OPTION for VIEW ... ON DUPLICATE KEY UPDATE ... */
         {
@@ -2025,14 +2045,12 @@ bool Query_result_insert::prepare(THD *thd, List<Item> &, SELECT_LEX_UNIT *u) {
 
   thd->num_truncated_fields = 0;
   if (thd->lex->is_ignore() || duplicate_handling != DUP_ERROR)
-    table->file->extra(HA_EXTRA_IGNORE_DUP_KEY);
+    table->file->ha_extra(HA_EXTRA_IGNORE_DUP_KEY);
   if (duplicate_handling == DUP_REPLACE &&
       (!table->triggers || !table->triggers->has_delete_triggers()))
-    table->file->extra(HA_EXTRA_WRITE_CAN_REPLACE);
+    table->file->ha_extra(HA_EXTRA_WRITE_CAN_REPLACE);
   if (duplicate_handling == DUP_UPDATE)
-    table->file->extra(HA_EXTRA_INSERT_WITH_UPDATE);
-
-  prepare_triggers_for_insert_stmt(thd, table);
+    table->file->ha_extra(HA_EXTRA_INSERT_WITH_UPDATE);
 
   for (Field **next_field = table->field; *next_field; ++next_field) {
     (*next_field)->reset_warnings();
@@ -2085,6 +2103,19 @@ bool Query_result_insert::send_data(THD *thd, List<Item> &values) {
     table->auto_increment_field_not_null = false;
     DBUG_RETURN(true);
   }
+
+  /*
+   TODO: This method is supposed to be called only once per-statement. But
+         currently it is called for each row inserted by INSERT SELECT. Which
+         looks like unnessary and results in resource wastage.
+  */
+  prepare_triggers_for_insert_stmt(thd, table);
+
+  if (invoke_table_check_constraints(thd, table)) {
+    // return false when IGNORE clause is used.
+    DBUG_RETURN(thd->is_error());
+  }
+
   if (table_list)  // Not CREATE ... SELECT
   {
     switch (table_list->view_check_option(thd)) {
@@ -2608,12 +2639,12 @@ bool Query_result_create::start_execution(THD *thd) {
   const enum_duplicates duplicate_handling = info.get_duplicate_handling();
 
   if (thd->lex->is_ignore() || duplicate_handling != DUP_ERROR)
-    table->file->extra(HA_EXTRA_IGNORE_DUP_KEY);
+    table->file->ha_extra(HA_EXTRA_IGNORE_DUP_KEY);
   if (duplicate_handling == DUP_REPLACE &&
       (!table->triggers || !table->triggers->has_delete_triggers()))
-    table->file->extra(HA_EXTRA_WRITE_CAN_REPLACE);
+    table->file->ha_extra(HA_EXTRA_WRITE_CAN_REPLACE);
   if (duplicate_handling == DUP_UPDATE)
-    table->file->extra(HA_EXTRA_INSERT_WITH_UPDATE);
+    table->file->ha_extra(HA_EXTRA_INSERT_WITH_UPDATE);
   if (thd->locked_tables_mode <= LTM_LOCK_TABLES) {
     table->file->ha_start_bulk_insert((ha_rows)0);
     bulk_insert_started = true;
@@ -2916,7 +2947,7 @@ void Query_result_create::drop_open_table(THD *thd) {
 
     handlerton *table_type = table->s->db_type();
 
-    table->file->extra(HA_EXTRA_PREPARE_FOR_DROP);
+    table->file->ha_extra(HA_EXTRA_PREPARE_FOR_DROP);
     close_thread_table(thd, &thd->open_tables);
     /*
       Remove TABLE and TABLE_SHARE objects for the table we have failed

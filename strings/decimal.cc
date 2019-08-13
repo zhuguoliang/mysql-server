@@ -1,4 +1,4 @@
-/* Copyright (c) 2004, 2018, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2004, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -40,7 +40,7 @@
   integer that determines the number of significant digits in a
   particular radix R, where R is either 2 or 10. S is a non-negative
   integer. Every value of an exact numeric type of scale S is of the
-  form n*10^{-S}, where n is an integer such that ­-R^P <= n <= R^P.
+  form n*10^{-S}, where n is an integer such that Â­-R^P <= n <= R^P.
 
   [...]
 
@@ -320,7 +320,9 @@ static inline int count_leading_zeroes(int i, dec1 val) {
     case 0:
       if (val >= 1) break;
       ++ret;  // Fall through.
-    default: { DBUG_ASSERT(false); }
+    default: {
+      DBUG_ASSERT(false);
+    }
   }
   return ret;
 }
@@ -374,7 +376,9 @@ static inline int count_trailing_zeroes(int i, dec1 val) {
     case 9:
       if ((uval % 1000000000) != 0) break;
       ++ret;  // Fall through.
-    default: { DBUG_ASSERT(false); }
+    default: {
+      DBUG_ASSERT(false);
+    }
   }
   return ret;
 }
@@ -435,9 +439,9 @@ static inline dec1 *remove_leading_zeroes(const decimal_t *from,
     from    number for processing
 */
 
-int decimal_actual_fraction(decimal_t *from) {
+int decimal_actual_fraction(const decimal_t *from) {
   int frac = from->frac, i;
-  dec1 *buf0 = from->buf + ROUND_UP(from->intg) + ROUND_UP(frac) - 1;
+  const dec1 *buf0 = from->buf + ROUND_UP(from->intg) + ROUND_UP(frac) - 1;
 
   if (frac == 0) return 0;
 
@@ -869,7 +873,7 @@ int decimal_shift(decimal_t *dec, int shift) {
     (to make error handling easier)
 */
 
-int string2decimal(const char *from, decimal_t *to, char **end) {
+int string2decimal(const char *from, decimal_t *to, const char **end) {
   const char *s = from, *s1, *endp, *end_of_string = *end;
   int i, intg, frac, error, intg1, frac1;
   dec1 x, *buf;
@@ -897,7 +901,7 @@ int string2decimal(const char *from, decimal_t *to, char **end) {
     endp = s;
   }
 
-  *end = (char *)endp;
+  *end = endp;
 
   if (frac + intg == 0) goto fatal_error;
 
@@ -944,12 +948,11 @@ int string2decimal(const char *from, decimal_t *to, char **end) {
   /* Handle exponent */
   if (endp + 1 < end_of_string && (*endp == 'e' || *endp == 'E')) {
     int str_error;
-    longlong exponent =
-        my_strtoll10(endp + 1, (char **)&end_of_string, &str_error);
+    longlong exponent = my_strtoll10(endp + 1, &end_of_string, &str_error);
 
     if (end_of_string != endp + 1) /* If at least one digit */
     {
-      *end = (char *)end_of_string;
+      *end = end_of_string;
       if (str_error > 0) {
         error = E_DEC_BAD_NUM;
         goto fatal_error;
@@ -974,6 +977,30 @@ fatal_error:
   return error;
 }
 
+/**
+  Add zeros behind comma to increase precision of decimal.
+
+  @param         new_frac the new fraction
+  @param[in,out] d        the decimal target
+
+  new_frac is exected to be larger or equal than cd->frac and
+  new fraction is expected to fit in d.
+*/
+void widen_fraction(int new_frac, decimal_t *d) {
+  const int frac = d->frac;
+  const int intg = d->intg;
+  const int frac1 = ROUND_UP(frac);
+  const int intg1 = ROUND_UP(intg);
+  int new_frac1 = ROUND_UP(new_frac);
+
+  if (new_frac < frac || intg1 + new_frac1 > d->len) {
+    DBUG_ASSERT(false);
+    return;
+  }
+  decimal_digit_t *buf = d->buf + intg1 + frac1;
+  std::fill_n(buf, new_frac1 - frac1, 0);
+  d->frac = new_frac;
+}
 /*
   Convert decimal to double
 
@@ -987,12 +1014,12 @@ fatal_error:
 */
 
 int decimal2double(const decimal_t *from, double *to) {
-  char strbuf[FLOATING_POINT_BUFFER], *end;
+  char strbuf[FLOATING_POINT_BUFFER];
   int len = sizeof(strbuf);
   int rc, error;
 
   rc = decimal2string(from, strbuf, &len, 0, 0, 0);
-  end = strbuf + len;
+  const char *end = strbuf + len;
 
   DBUG_PRINT("info", ("interm.: %s", strbuf));
 
@@ -1016,11 +1043,11 @@ int decimal2double(const decimal_t *from, double *to) {
 */
 
 int double2decimal(double from, decimal_t *to) {
-  char buff[FLOATING_POINT_BUFFER], *end;
+  char buff[FLOATING_POINT_BUFFER];
   int res;
   DBUG_ENTER("double2decimal");
-  end = buff +
-        my_gcvt(from, MY_GCVT_ARG_DOUBLE, (int)sizeof(buff) - 1, buff, NULL);
+  const char *end = buff + my_gcvt(from, MY_GCVT_ARG_DOUBLE,
+                                   (int)sizeof(buff) - 1, buff, NULL);
   res = string2decimal(buff, to, &end);
   DBUG_PRINT("exit", ("res: %d", res));
   DBUG_RETURN(res);
@@ -1407,16 +1434,21 @@ int decimal2bin(decimal_t *from, uchar *to, int precision, int frac) {
       from    - value to convert
       to      - result
       precision/scale - see decimal_bin_size() below
+      keep_prec do not trim leading zeros
 
   NOTE
     see decimal2bin()
     the buffer is assumed to be of the size decimal_bin_size(precision, scale)
+    If the keep_prec is true, the value will be read and returned as is,
+    without precision reduction. This is used to read DECIMAL values that
+    are to be indexed by multi-valued index.
 
   RETURN VALUE
     E_DEC_OK/E_DEC_TRUNCATED/E_DEC_OVERFLOW
 */
 
-int bin2decimal(const uchar *from, decimal_t *to, int precision, int scale) {
+int bin2decimal(const uchar *from, decimal_t *to, int precision, int scale,
+                bool keep_prec) {
   int error = E_DEC_OK, intg = precision - scale, intg0 = intg / DIG_PER_DEC1,
       frac0 = scale / DIG_PER_DEC1, intg0x = intg - intg0 * DIG_PER_DEC1,
       frac0x = scale - frac0 * DIG_PER_DEC1, intg1 = intg0 + (intg0x > 0),
@@ -1470,7 +1502,7 @@ int bin2decimal(const uchar *from, decimal_t *to, int precision, int scale) {
     from += i;
     *buf = x ^ mask;
     if (((ulonglong)*buf) >= (ulonglong)powers10[intg0x + 1]) goto err;
-    if (buf > to->buf || *buf != 0)
+    if (buf > to->buf || *buf != 0 || keep_prec)
       buf++;
     else
       to->intg -= intg0x;
@@ -1479,7 +1511,7 @@ int bin2decimal(const uchar *from, decimal_t *to, int precision, int scale) {
     DBUG_ASSERT(sizeof(dec1) == 4);
     *buf = mi_sint4korr(from) ^ mask;
     if (((uint32)*buf) > DIG_MAX) goto err;
-    if (buf > to->buf || *buf != 0)
+    if (buf > to->buf || *buf != 0 || keep_prec)
       buf++;
     else
       to->intg -= DIG_PER_DEC1;
@@ -1518,6 +1550,7 @@ int bin2decimal(const uchar *from, decimal_t *to, int precision, int scale) {
   /*
     No digits? We have read the number zero, of unspecified precision.
     Make it a proper zero, with non-zero precision.
+    Note: this is valid only if scale == 0, otherwise frac is always non-zero
   */
   if (to->intg == 0 && to->frac == 0) decimal_make_zero(to);
   return error;

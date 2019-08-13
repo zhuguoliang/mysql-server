@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2018, Oracle and/or its affiliates. All rights reserved.
+   Copyright (c) 2003, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -29,21 +29,27 @@
 #include <NdbAutoPtr.hpp>
 #include <NdbOut.hpp>
 #include "atrt.hpp"
+#include "test_execution_resources.hpp"
 
+#include <util/File.hpp>
 #include <FileLogHandler.hpp>
 #include <SysLogHandler.hpp>
 
 #include <NdbSleep.h>
 #include "my_alloc.h"  // MEM_ROOT
+#include <ndb_version.h>
+#include <vector>
+#include <ndb_version.h>
 
 #define PATH_SEPARATOR DIR_SEPARATOR
 #define TESTCASE_RETRIES_THRESHOLD_WARNING 5
+#define ATRT_VERSION_NUMBER 1
 
 /** Global variables */
 static const char progname[] = "ndb_atrt";
-static const char *g_gather_progname = "atrt-gather-result.sh";
-static const char *g_analyze_progname = "atrt-analyze-result.sh";
-static const char *g_setup_progname = "atrt-setup.sh";
+static const char *g_gather_progname = 0;
+static const char *g_analyze_progname = 0;
+static const char *g_setup_progname = 0;
 
 static const char *g_log_filename = 0;
 static const char *g_test_case_filename = 0;
@@ -90,39 +96,20 @@ const char *g_dummy;
 char *g_env_path = 0;
 const char *g_mysqld_host = 0;
 
-const char *g_ndb_mgmd_bin_path = 0;
-const char *g_ndbd_bin_path = 0;
-const char *g_ndbmtd_bin_path = 0;
-const char *g_mysqld_bin_path = 0;
-const char *g_mysql_install_db_bin_path = 0;
-const char *g_libmysqlclient_so_path = 0;
+TestExecutionResources g_resources;
 
-static struct {
-  bool is_required;
-  const char *exe;
-  const char **var;
-} g_binaries[] = {{true, "ndb_mgmd", &g_ndb_mgmd_bin_path},
-                  {true, "ndbd", &g_ndbd_bin_path},
-                  {false, "ndbmtd", &g_ndbmtd_bin_path},
-                  {true, "mysqld", &g_mysqld_bin_path},
-                  {false, "mysql_install_db", &g_mysql_install_db_bin_path},
-#if defined(__MACH__)
-                  {true, "libmysqlclient.dylib", &g_libmysqlclient_so_path},
-#else
-                  {true, "libmysqlclient.so", &g_libmysqlclient_so_path},
-#endif
-                  {true, 0, 0}};
+static BaseString get_atrt_path(const char *arg);
 
 const char *g_search_path[] = {"bin", "libexec",   "sbin", "scripts",
                                "lib", "lib/mysql", 0};
-static bool find_binaries();
+static bool find_scripts(const char *path);
 static bool find_config_ini_files();
 
 static struct my_option g_options[] = {
     {"help", '?', "Display this help and exit.", (uchar **)&g_help,
      (uchar **)&g_help, 0, GET_BOOL, NO_ARG, 0, 0, 0, 0, 0, 0},
     {"version", 'V', "Output version information and exit.", 0, 0, 0,
-     GET_NO_ARG, NO_ARG, 0, 0, 0, 0, 0, 0},
+     GET_BOOL, NO_ARG, 0, 0, 0, 0, 0, 0},
     {"site", 256, "Site", (uchar **)&g_site, (uchar **)&g_site, 0, GET_STR,
      REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
     {"clusters", 256, "Cluster", (uchar **)&g_clusters, (uchar **)&g_clusters,
@@ -219,15 +206,43 @@ int main(int argc, char **argv) {
   MEM_ROOT alloc = MEM_ROOT{PSI_NOT_INSTRUMENTED, 512};
   if (!parse_args(argc, argv, &alloc)) {
     g_logger.critical("Failed to parse arguments");
+    return_code = ATRT_FAILURE;
     goto end;
   }
 
-  g_logger.info("Starting...");
+  g_logger.info("Starting ATRT version : %s", getAtrtVersion().c_str());
 
-  if (!find_binaries()) {
-    g_logger.critical("Failed to find required binaries for execution");
-    return_code = ATRT_FAILURE;
-    goto end;
+  if (g_mt != 0) {
+    g_resources.setRequired(g_resources.NDBMTD);
+  }
+
+  {
+    std::vector<std::string> error;
+    std::vector<std::string> info;
+    if (!g_resources.loadPaths(g_prefix0, g_prefix1, &error, &info)) {
+      g_logger.critical("Failed to find required binaries for execution");
+
+      for (auto msg : error) {
+        g_logger.critical("%s", msg.c_str());
+        return_code = ATRT_FAILURE;
+        goto end;
+      }
+    }
+
+    for (auto msg : info) {
+      g_logger.info("%s", msg.c_str());
+    }
+  }
+
+  {
+    BaseString atrt_path = get_atrt_path(argv[0]);
+    assert(atrt_path != "");
+
+    if (!find_scripts(atrt_path.c_str())) {
+      g_logger.critical("Failed to find required atrt scripts for execution");
+      return_code = ATRT_FAILURE;
+      goto end;
+    }
   }
 
   g_config.m_config_type = atrt_config::CNF;
@@ -383,8 +398,8 @@ int main(int argc, char **argv) {
     do {
       testruns++;
       /**
-      * Do we need to restart ndb
-      */
+       * Do we need to restart ndb
+       */
       if (restart || test_case.m_force_cluster_restart) {
         if (test_case.m_force_cluster_restart) {
           g_logger.info(
@@ -523,6 +538,7 @@ int main(int argc, char **argv) {
 
       if (!wait_for_processes_to_stop(g_config, p_clients)) {
         g_logger.critical("Failed to stop client processes");
+        return_code = ATRT_FAILURE;
         goto cleanup;
       }
 
@@ -533,11 +549,26 @@ int main(int argc, char **argv) {
         goto end;
       }
 
-      g_logger.info("#%d %s(%d)", test_no, (result == 0 ? "OK" : "FAILED"),
-                    result);
-      restart = result != 0;
+      const char *test_status;
+      switch (result) {
+        case ErrorCodes::ERR_OK:
+          test_status = "OK";
+          break;
+        case ErrorCodes::ERR_TEST_SKIPPED:
+          test_status = "SKIPPED";
+          break;
+        default:
+          test_status = "FAILED";
+          break;
+      }
+      g_logger.info("#%d %s(%d)", test_no, test_status, result);
 
-      retry_test = result != 0 && testruns <= test_case.m_max_retries;
+      const bool failed = (result != ErrorCodes::ERR_OK &&
+                           result != ErrorCodes::ERR_TEST_SKIPPED);
+
+      restart = failed;
+
+      retry_test = failed && testruns <= test_case.m_max_retries;
       if (retry_test) {
         g_logger.info("Retrying test #%d - '%s', attempt (%d/%d)", test_no,
                       test_case.m_name.c_str(), testruns,
@@ -546,7 +577,8 @@ int main(int argc, char **argv) {
       }
     } while (retry_test);
 
-    if (result != 0) {
+    if (result != ErrorCodes::ERR_OK &&
+        result != ErrorCodes::ERR_TEST_SKIPPED) {
       return_code = TESTSUITE_FAILURES;
     }
 
@@ -625,6 +657,13 @@ extern "C" bool get_one_option(int arg, const struct my_option *opt,
 bool parse_args(int argc, char **argv, MEM_ROOT *alloc) {
   bool fail_after_help = false;
   char buf[2048];
+
+  if (argc >= 2 &&
+      (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-V") == 0)) {
+    ndbout << getAtrtVersion().c_str() << endl;
+    exit(0);
+  }
+
   if (getcwd(buf, sizeof(buf)) == 0) {
     g_logger.error("Unable to get current working directory");
     return false;
@@ -864,6 +903,15 @@ bool parse_args(int argc, char **argv, MEM_ROOT *alloc) {
   return true;
 }
 
+std::string getAtrtVersion() {
+  int mysql_version = ndbGetOwnVersion();
+  std::string version = std::to_string(ndbGetMajor(mysql_version)) + "." +
+                        std::to_string(ndbGetMinor(mysql_version)) + "." +
+                        std::to_string(ndbGetBuild(mysql_version)) + "." +
+                        std::to_string(ATRT_VERSION_NUMBER);
+  return version;
+}
+
 bool connect_hosts(atrt_config &config) {
   for (unsigned i = 0; i < config.m_hosts.size(); i++) {
     if (config.m_hosts[i]->m_hostname.length() == 0) continue;
@@ -1038,22 +1086,24 @@ bool wait_ndb(atrt_config &config, int goal) {
   return cnt == config.m_clusters.size();
 }
 
-bool start_process(atrt_process &proc) {
+bool start_process(atrt_process &proc, bool run_setup) {
   if (proc.m_proc.m_id != -1) {
     g_logger.critical("starting already started process: %u",
                       (unsigned)proc.m_index);
     return false;
   }
 
-  BaseString tmp = g_setup_progname;
-  tmp.appfmt(" %s %s/ %s", proc.m_host->m_hostname.c_str(),
-             proc.m_proc.m_cwd.c_str(), proc.m_proc.m_cwd.c_str());
+  if (run_setup) {
+    BaseString tmp = g_setup_progname;
+    tmp.appfmt(" %s %s/ %s", proc.m_host->m_hostname.c_str(),
+               proc.m_proc.m_cwd.c_str(), proc.m_proc.m_cwd.c_str());
 
-  g_logger.debug("system(%s)", tmp.c_str());
-  const int r1 = sh(tmp.c_str());
-  if (r1 != 0) {
-    g_logger.critical("Failed to setup process");
-    return false;
+    g_logger.debug("system(%s)", tmp.c_str());
+    const int r1 = sh(tmp.c_str());
+    if (r1 != 0) {
+      g_logger.critical("Failed to setup process");
+      return false;
+    }
   }
 
   /**
@@ -1748,23 +1798,29 @@ bool reset_config(atrt_config &config) {
   return changed;
 }
 
-static bool find_binaries() {
-  g_logger.info("Locating binaries...");
-  bool ok = true;
-  for (int i = 0; g_binaries[i].exe != 0; i++) {
-    const char *p = find_bin_path(g_binaries[i].exe);
-    if (p == 0) {
-      if (g_binaries[i].is_required) {
-        g_logger.critical("Failed to locate '%s'", g_binaries[i].exe);
-        ok = false;
-      } else {
-        g_logger.info("Failed to locate '%s'...ok", g_binaries[i].exe);
-      }
-    } else {
-      *g_binaries[i].var = p;
+bool find_scripts(const char *atrt_path) {
+  g_logger.info("Locating scripts...");
+
+  struct script_path {
+    const char *name;
+    const char **path;
+  };
+  std::vector<struct script_path> scripts = {
+      {"atrt-gather-result.sh", &g_gather_progname},
+      {"atrt-analyze-result.sh", &g_analyze_progname},
+      {"atrt-setup.sh", &g_setup_progname}};
+
+  for (auto &script : scripts) {
+    BaseString script_full_path;
+    script_full_path.assfmt("%s/%s", atrt_path, script.name);
+    if (!File_class::exists(script_full_path.c_str())) {
+      g_logger.critical("atrt script %s could not be found in %s", script.name,
+                        atrt_path);
+      return false;
     }
+    *script.path = strdup(script_full_path.c_str());
   }
-  return ok;
+  return true;
 }
 
 static bool find_config_ini_files() {
@@ -1788,6 +1844,21 @@ static bool find_config_ini_files() {
   }
 
   return found;
+}
+
+BaseString get_atrt_path(const char *arg) {
+  char *fullPath = realpath(arg, nullptr);
+  if (fullPath == nullptr) return {};
+
+  BaseString path;
+  char *last_folder_sep = strrchr(fullPath, '/');
+  if (last_folder_sep != nullptr) {
+    *last_folder_sep = '\0';
+    path.assign(fullPath);
+  }
+
+  free(fullPath);
+  return path;
 }
 
 template class Vector<Vector<SimpleCpcClient::Process> >;
@@ -1858,6 +1929,10 @@ void print_testcase_file_syntax() {
       "mysqld   - Arguments that atrt will use when starting mysqld.\n"
       "cmd-type - If 'mysql' change test process type from ndbapi to client.\n"
       "name     - Change name of test.  Default is given by cmd and args.\n"
+      "force-cluster-restart - If 'yes' force restart the cluster before\n"
+      "                        running test.\n"
+      "max-retries - Maximum number of retries after test failed.\n"
+      ""
       "\n"
       "Example:\n"
       "# BASIC FUNCTIONALITY\n"

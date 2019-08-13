@@ -1,4 +1,4 @@
-/* Copyright (c) 2000, 2018, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2000, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -163,9 +163,9 @@ int STDCALL mysql_server_init(int argc MY_ATTRIBUTE((unused)),
     if (!mysql_unix_port) {
       char *env;
 #ifdef _WIN32
-      mysql_unix_port = (char *)MYSQL_NAMEDPIPE;
+      mysql_unix_port = const_cast<char *>(MYSQL_NAMEDPIPE);
 #else
-      mysql_unix_port = (char *)MYSQL_UNIX_ADDR;
+      mysql_unix_port = const_cast<char *>(MYSQL_UNIX_ADDR);
 #endif
       if ((env = getenv("MYSQL_UNIX_PORT"))) mysql_unix_port = env;
     }
@@ -757,9 +757,9 @@ int STDCALL mysql_shutdown(MYSQL *mysql,
                            enum mysql_enum_shutdown_level shutdown_level
                                MY_ATTRIBUTE((unused))) {
   if (mysql_get_server_version(mysql) < 50709)
-    return simple_command(mysql, COM_DEPRECATED_1, 0, 1, 0);
+    return simple_command(mysql, COM_DEPRECATED_1, 0, 0, 0);
   else
-    return mysql_real_query(mysql, C_STRING_WITH_LEN("shutdown"));
+    return mysql_real_query(mysql, STRING_WITH_LEN("shutdown"));
 }
 
 int STDCALL mysql_refresh(MYSQL *mysql, uint options) {
@@ -840,9 +840,7 @@ uint STDCALL mysql_get_proto_info(MYSQL *mysql) {
   return (mysql->protocol_version);
 }
 
-const char *STDCALL mysql_get_client_info(void) {
-  return (char *)MYSQL_SERVER_VERSION;
-}
+const char *STDCALL mysql_get_client_info(void) { return MYSQL_SERVER_VERSION; }
 
 ulong STDCALL mysql_get_client_version(void) { return MYSQL_VERSION_ID; }
 
@@ -1094,20 +1092,20 @@ void STDCALL myodbc_remove_escape(MYSQL *mysql, char *name) {
   *to = 0;
 }
 
-  /********************************************************************
-   Implementation of new client API for 4.1 version.
+/********************************************************************
+ Implementation of new client API for 4.1 version.
 
-   mysql_stmt_* are real prototypes used by applications.
+ mysql_stmt_* are real prototypes used by applications.
 
-   All functions performing
-   real I/O are prefixed with 'cli_' (abbreviated from 'Call Level
-   Interface'). This functions are invoked via pointers set in
-   MYSQL::methods structure.
-  *********************************************************************/
+ All functions performing
+ real I/O are prefixed with 'cli_' (abbreviated from 'Call Level
+ Interface'). This functions are invoked via pointers set in
+ MYSQL::methods structure.
+*********************************************************************/
 
-  /******************* Declarations ***********************************/
+/******************* Declarations ***********************************/
 
-  /* Default number of rows fetched per one COM_STMT_FETCH command. */
+/* Default number of rows fetched per one COM_STMT_FETCH command. */
 
 #define DEFAULT_PREFETCH_ROWS (ulong)1
 
@@ -1508,8 +1506,7 @@ int STDCALL mysql_stmt_prepare(MYSQL_STMT *stmt, const char *query,
     or stmt->params when checking for existence of placeholders or
     result set.
   */
-  if (!(stmt->params = (MYSQL_BIND *)alloc_root(
-            stmt->mem_root,
+  if (!(stmt->params = (MYSQL_BIND *)stmt->mem_root->Alloc(
             sizeof(MYSQL_BIND) * (stmt->param_count + stmt->field_count)))) {
     set_stmt_error(stmt, CR_OUT_OF_MEMORY, unknown_sqlstate, NULL);
     DBUG_RETURN(1);
@@ -1547,10 +1544,10 @@ static void alloc_stmt_fields(MYSQL_STMT *stmt) {
     Get the field information for non-select statements
     like SHOW and DESCRIBE commands
   */
-  if (!(stmt->fields = (MYSQL_FIELD *)alloc_root(
-            fields_mem_root, sizeof(MYSQL_FIELD) * stmt->field_count)) ||
-      !(stmt->bind = (MYSQL_BIND *)alloc_root(
-            fields_mem_root, sizeof(MYSQL_BIND) * stmt->field_count))) {
+  if (!(stmt->fields = (MYSQL_FIELD *)fields_mem_root->Alloc(
+            sizeof(MYSQL_FIELD) * stmt->field_count)) ||
+      !(stmt->bind = (MYSQL_BIND *)fields_mem_root->Alloc(sizeof(MYSQL_BIND) *
+                                                          stmt->field_count))) {
     set_stmt_error(stmt, CR_OUT_OF_MEMORY, unknown_sqlstate, NULL);
     return;
   }
@@ -1895,8 +1892,8 @@ static inline int add_binary_row(NET *net, MYSQL_STMT *stmt, ulong pkt_len,
   MYSQL_ROWS *row;
   uchar *cp = net->read_pos;
   MYSQL_DATA *result = &stmt->result;
-  if (!(row = (MYSQL_ROWS *)alloc_root(result->alloc,
-                                       sizeof(MYSQL_ROWS) + pkt_len - 1))) {
+  if (!(row = (MYSQL_ROWS *)result->alloc->Alloc(sizeof(MYSQL_ROWS) + pkt_len -
+                                                 1))) {
     set_stmt_error(stmt, CR_OUT_OF_MEMORY, unknown_sqlstate, NULL);
     return 1;
   }
@@ -2101,7 +2098,7 @@ static int stmt_read_row_buffered(MYSQL_STMT *stmt, unsigned char **row) {
 
 /*
   Read one row from network: unbuffered non-cursor fetch.
-  If last row was read, or error occured, erase this statement
+  If last row was read, or error occurred, erase this statement
   from record pointing to object unbuffered fetch is performed from.
 
   SYNOPSIS
@@ -2248,13 +2245,14 @@ bool STDCALL mysql_stmt_attr_set(MYSQL_STMT *stmt,
       break;
     case STMT_ATTR_CURSOR_TYPE: {
       ulong cursor_type;
-      cursor_type = value ? *(ulong *)value : 0UL;
+      cursor_type = value ? *static_cast<const ulong *>(value) : 0UL;
       if (cursor_type > (ulong)CURSOR_TYPE_READ_ONLY) goto err_not_implemented;
       stmt->flags = cursor_type;
       break;
     }
     case STMT_ATTR_PREFETCH_ROWS: {
-      ulong prefetch_rows = value ? *(ulong *)value : DEFAULT_PREFETCH_ROWS;
+      ulong prefetch_rows =
+          value ? *static_cast<const ulong *>(value) : DEFAULT_PREFETCH_ROWS;
       if (value == 0) return true;
       stmt->prefetch_rows = prefetch_rows;
       break;
@@ -2832,9 +2830,9 @@ bool STDCALL mysql_stmt_send_long_data(MYSQL_STMT *stmt, uint param_number,
       Note that we don't get any ok packet from the server in this case
       This is intentional to save bandwidth.
     */
-    if ((*mysql->methods->advanced_command)(mysql, COM_STMT_SEND_LONG_DATA,
-                                            buff, sizeof(buff), (uchar *)data,
-                                            length, 1, stmt)) {
+    if ((*mysql->methods->advanced_command)(
+            mysql, COM_STMT_SEND_LONG_DATA, buff, sizeof(buff),
+            pointer_cast<const uchar *>(data), length, 1, stmt)) {
       /*
         Don't set stmt error if stmt->mysql is NULL, as the error in this case
         has already been set by mysql_prune_stmt_list().
@@ -2949,7 +2947,7 @@ static void read_binary_date(MYSQL_TIME *tm, uchar **pos) {
 static void fetch_string_with_conversion(MYSQL_BIND *param, char *value,
                                          size_t length) {
   uchar *buffer = pointer_cast<uchar *>(param->buffer);
-  char *endptr = value + length;
+  const char *endptr = value + length;
 
   /*
     This function should support all target buffer types: the rest
@@ -3315,7 +3313,7 @@ static void fetch_datetime_with_conversion(MYSQL_BIND *param,
       break;
     case MYSQL_TYPE_FLOAT:
     case MYSQL_TYPE_DOUBLE: {
-      ulonglong value = TIME_to_ulonglong(my_time);
+      ulonglong value = TIME_to_ulonglong(*my_time);
       fetch_float_with_conversion(param, field, ulonglong2double(value),
                                   MY_GCVT_ARG_DOUBLE);
       break;
@@ -3325,7 +3323,7 @@ static void fetch_datetime_with_conversion(MYSQL_BIND *param,
     case MYSQL_TYPE_INT24:
     case MYSQL_TYPE_LONG:
     case MYSQL_TYPE_LONGLONG: {
-      longlong value = (longlong)TIME_to_ulonglong(my_time);
+      longlong value = (longlong)TIME_to_ulonglong(*my_time);
       fetch_long_with_conversion(param, field, value, true);
       break;
     }
@@ -3335,7 +3333,7 @@ static void fetch_datetime_with_conversion(MYSQL_BIND *param,
         fetch_string_with_conversion:
       */
       char buff[MAX_DATE_STRING_REP_LENGTH];
-      uint length = my_TIME_to_str(my_time, buff, field->decimals);
+      uint length = my_TIME_to_str(*my_time, buff, field->decimals);
       /* Resort to string conversion */
       fetch_string_with_conversion(param, (char *)buff, length);
       break;
@@ -4540,6 +4538,40 @@ int STDCALL mysql_next_result(MYSQL *mysql) {
   }
 
   DBUG_RETURN(-1); /* No more results */
+}
+
+/*
+  This API reads the next statement result and returns a status to indicate
+  whether more results exist
+
+  @param[in]    mysql                                    connection handle
+
+  @retval       NET_ASYNC_ERROR                          Error
+  @retval       NET_ASYNC_NOT_READY                      reading next result not
+                                                         yet completed, call
+                                                         this API again
+  @retval       NET_ASYNC_COMPLETE                       finished reading result
+  @retval       NET_ASYNC_COMPLETE_NO_MORE_RESULTS       status to indicate if
+                                                         more results exist
+*/
+net_async_status STDCALL mysql_next_result_nonblocking(MYSQL *mysql) {
+  DBUG_ENTER(__func__);
+  net_async_status status;
+  if (mysql->status != MYSQL_STATUS_READY) {
+    set_mysql_error(mysql, CR_COMMANDS_OUT_OF_SYNC, unknown_sqlstate);
+    DBUG_RETURN(NET_ASYNC_ERROR);
+  }
+  net_clear_error(&mysql->net);
+  mysql->affected_rows = ~(my_ulonglong)0;
+
+  if (mysql->server_status & SERVER_MORE_RESULTS_EXISTS) {
+    status = (*mysql->methods->next_result_nonblocking)(mysql);
+    DBUG_RETURN(status);
+  } else {
+    MYSQL_TRACE_STAGE(mysql, READY_FOR_COMMAND);
+  }
+
+  DBUG_RETURN(NET_ASYNC_COMPLETE_NO_MORE_RESULTS); /* No more results */
 }
 
 int STDCALL mysql_stmt_next_result(MYSQL_STMT *stmt) {

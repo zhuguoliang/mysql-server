@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2018, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 1995, 2019, Oracle and/or its affiliates. All Rights Reserved.
 Copyright (c) 2009, Google Inc.
 
 This program is free software; you can redistribute it and/or modify
@@ -57,6 +57,7 @@ the file COPYING.Google.
 #endif /* !UNIV_HOTBACKUP */
 #include "fil0fil.h"
 #include "log0log.h"
+#include "log0meb.h"
 #ifndef UNIV_HOTBACKUP
 #include "log0recv.h"
 #include "mem0mem.h"
@@ -728,14 +729,6 @@ and log flush_notifier thread is not notified! (optimization)
 @param[in,out]	log   redo log */
 static void log_flush_low(log_t &log);
 
-/** Writes encryption information to log header.
-@param[in,out]  buf       log file header
-@param[in]      key       encryption key
-@param[in]      iv        encryption iv
-@param[in]      is_boot   if it's for bootstrap */
-static bool log_file_header_fill_encryption(byte *buf, byte *key, byte *iv,
-                                            bool is_boot);
-
 /**************************************************/ /**
 
  @name Waiting for redo log written or flushed up to lsn
@@ -775,7 +768,8 @@ static inline uint64_t log_max_spins_when_waiting_in_user_thread(
     might be used. */
     const double r = 1.0 * (hwm / 2 - cpu) / (hwm / 2);
 
-    max_spins = min_non_zero_value + r * min_non_zero_value * 9;
+    max_spins =
+        static_cast<uint64_t>(min_non_zero_value + r * min_non_zero_value * 9);
   }
 
   return (max_spins);
@@ -910,7 +904,7 @@ Wait_stats log_write_up_to(log_t &log, lsn_t end_lsn, bool flush_to_disk) {
   ut_a(end_lsn % OS_FILE_LOG_BLOCK_SIZE <=
        OS_FILE_LOG_BLOCK_SIZE - LOG_BLOCK_TRL_SIZE);
 
-  ut_a(end_lsn <= log_get_lsn(log));
+  ut_ad(end_lsn <= log_get_lsn(log));
 
   if (flush_to_disk) {
     if (log.flushed_to_disk_lsn.load() >= end_lsn) {
@@ -1003,7 +997,8 @@ struct Log_thread_waiting {
       is no real gain from spinning in log threads then. */
 
       spin_delay = 0;
-      min_timeout = req_interval < 1000 ? req_interval : 1000;
+      min_timeout =
+          static_cast<uint32_t>(req_interval < 1000 ? req_interval : 1000);
     }
 
     const auto wait_stats =
@@ -1478,6 +1473,8 @@ static inline void write_blocks(log_t &log, byte *write_buf, size_t write_size,
       IORequestLogWrite, page_id_t{log.files_space_id, page_no}, univ_page_size,
       static_cast<ulint>(real_offset % UNIV_PAGE_SIZE), write_size, write_buf);
 
+  meb::redo_log_archive_produce(write_buf, write_size);
+
   ut_a(err == DB_SUCCESS);
 }
 
@@ -1488,6 +1485,10 @@ static inline size_t compute_write_event_slot(const log_t &log, lsn_t lsn) {
 static inline void notify_about_advanced_write_lsn(log_t &log,
                                                    lsn_t old_write_lsn,
                                                    lsn_t new_write_lsn) {
+  if (srv_flush_log_at_trx_commit == 1) {
+    os_event_set(log.flusher_event);
+  }
+
   const auto first_slot = compute_write_event_slot(log, old_write_lsn);
 
   const auto last_slot = compute_write_event_slot(log, new_write_lsn);
@@ -1498,6 +1499,10 @@ static inline void notify_about_advanced_write_lsn(log_t &log,
   } else {
     LOG_SYNC_POINT("log_write_before_notifier_notify");
     os_event_set(log.write_notifier_event);
+  }
+
+  if (arch_log_sys && arch_log_sys->is_active()) {
+    os_event_set(log_archiver_thread_event);
   }
 }
 
@@ -1665,12 +1670,29 @@ static void log_files_write_buffer(log_t &log, byte *buffer, size_t buffer_size,
     We write completed blocks from the log buffer. Note,
     that possibly we do not write all completed blocks,
     because of write-ahead strategy (described earlier). */
+    DBUG_PRINT("ib_log",
+               ("write from log buffer start_lsn=" LSN_PF " write_lsn=" LSN_PF
+                " -> " LSN_PF,
+                start_lsn, log.write_lsn.load(), start_lsn + lsn_advance));
 
     write_buf = buffer;
 
     LOG_SYNC_POINT("log_writer_before_write_from_log_buffer");
 
   } else {
+    DBUG_PRINT("ib_log",
+               ("incomplete write start_lsn=" LSN_PF " write_lsn=" LSN_PF
+                " -> " LSN_PF,
+                start_lsn, log.write_lsn.load(), start_lsn + lsn_advance));
+
+#ifdef UNIV_DEBUG
+    if (start_lsn == log.write_lsn.load()) {
+      LOG_SYNC_POINT("log_writer_before_write_new_incomplete_block");
+    }
+    /* Else: we are doing yet another incomplete block write within the
+    same block as the one in which we did the previous write. */
+#endif /* UNIV_DEBUG */
+
     write_buf = log.write_ahead_buf;
 
     /* We write all the data directly from the write-ahead buffer,
@@ -1770,6 +1792,8 @@ static lsn_t log_writer_wait_on_checkpoint(log_t &log, lsn_t last_write_lsn,
       log_increase_concurrency_margin(log);
     }
 
+    os_event_set(log.checkpointer_event);
+
     if (last_write_lsn + OS_FILE_LOG_BLOCK_SIZE <= checkpoint_limited_lsn) {
       /* Write what we have - adjust the speed to speed of checkpoints
       going forward (to speed of page-cleaners). */
@@ -1862,7 +1886,7 @@ static void log_writer_wait_on_archiver(log_t &log, lsn_t last_write_lsn,
       break;
     }
 
-    os_event_set(archiver_thread_event);
+    os_event_set(log_archiver_thread_event);
 
     log_writer_mutex_exit(log);
 
@@ -1973,19 +1997,10 @@ static void log_writer_write_buffer(log_t &log, lsn_t next_write_lsn) {
   log_update_limits(log);
 
   LOG_SYNC_POINT("log_writer_write_end");
-
-  if (srv_flush_log_at_trx_commit == 1) {
-    os_event_set(log.flusher_event);
-  }
-
-  if (arch_log_sys && arch_log_sys->is_active()) {
-    os_event_set(archiver_thread_event);
-  }
 }
 
 void log_writer(log_t *log_ptr) {
   ut_a(log_ptr != nullptr);
-  ut_a(log_ptr->writer_thread_alive.load());
 
   log_t &log = *log_ptr;
   lsn_t ready_lsn = 0;
@@ -2002,7 +2017,6 @@ void log_writer(log_t *log_ptr) {
 
     auto stop_condition = [&ready_lsn, &log, &released,
                            &write_to_file_requests_monitor](bool wait) {
-
       if (released) {
         log_writer_mutex_enter(log);
         released = false;
@@ -2070,11 +2084,6 @@ void log_writer(log_t *log_ptr) {
       }
     }
   }
-
-  log.writer_thread_alive.store(false);
-
-  os_event_set(log.write_notifier_event);
-  os_event_set(log.flusher_event);
 
   log_writer_mutex_exit(log);
 }
@@ -2245,7 +2254,6 @@ static void log_flush_low(log_t &log) {
 
 void log_flusher(log_t *log_ptr) {
   ut_a(log_ptr != nullptr);
-  ut_a(log_ptr->flusher_thread_alive.load());
 
   log_t &log = *log_ptr;
 
@@ -2255,11 +2263,19 @@ void log_flusher(log_t *log_ptr) {
   log_flusher_mutex_enter(log);
 
   // log_flusher 卡在这个loop 里面
-  for (uint64_t step = 0; log.writer_thread_alive.load(); ++step) {
+  for (uint64_t step = 0;; ++step) {
+    if (log.should_stop_threads.load()) {
+      if (!log_writer_is_active()) {
+        /* If write_lsn > flushed_to_disk_lsn, we are going to execute
+        one more fsync just after the for-loop and before this thread
+        exits (inside log_flush_low at the very end of function def.). */
+        break;
+      }
+    }
+
     bool released = false;
 
     auto stop_condition = [&log, &released, step](bool wait) {
-
       if (released) {
         log_flusher_mutex_enter(log);
         released = false;
@@ -2287,8 +2303,10 @@ void log_flusher(log_t *log_ptr) {
       }
 
       /* Stop waiting if writer thread is dead. */
-      if (!log.writer_thread_alive.load()) {
-        return (true);
+      if (log.should_stop_threads.load()) {
+        if (!log_writer_is_active()) {
+          return (true);
+        }
       }
 
       if (wait) {
@@ -2328,12 +2346,9 @@ void log_flusher(log_t *log_ptr) {
       if (time_elapsed_us < flush_every_us) {
         log_flusher_mutex_exit(log);
 
-        if (log.writer_thread_alive.load()) {
-          /* If log.writer_thread_alive became false just now, we would
-          have the flusher_event set, because: the only place where we
-          can reset is just before fsync and after writer_thread_alive
-          is set to false, the flusher_event is set. */
-
+        /* When we are asked to stop threads, do not respect the limit
+        for flushes per second. */
+        if (!log.should_stop_threads.load()) {
           os_event_wait_time_low(log.flusher_event,
                                  flush_every_us - time_elapsed_us, 0);
         }
@@ -2354,9 +2369,7 @@ void log_flusher(log_t *log_ptr) {
     log_flush_low(log);
   }
 
-  log.flusher_thread_alive.store(false);
-
-  os_event_set(log.flush_notifier_event);
+  ut_a(log.write_lsn.load() == log.flushed_to_disk_lsn.load());
 
   log_flusher_mutex_exit(log);
 }
@@ -2373,7 +2386,6 @@ void log_flusher(log_t *log_ptr) {
 
 void log_write_notifier(log_t *log_ptr) {
   ut_a(log_ptr != nullptr);
-  ut_a(log_ptr->write_notifier_thread_alive.load());
 
   log_t &log = *log_ptr;
   lsn_t lsn = log.write_lsn.load() + 1;
@@ -2385,10 +2397,12 @@ void log_write_notifier(log_t *log_ptr) {
                              srv_log_write_notifier_timeout};
 
   for (uint64_t step = 0;; ++step) {
-    if (!log.writer_thread_alive.load()) {
-      if (lsn > log.write_lsn.load()) {
-        ut_a(lsn == log.write_lsn.load() + 1);
-        break;
+    if (log.should_stop_threads.load()) {
+      if (!log_writer_is_active()) {
+        if (lsn > log.write_lsn.load()) {
+          ut_a(lsn == log.write_lsn.load() + 1);
+          break;
+        }
       }
     }
 
@@ -2397,7 +2411,6 @@ void log_write_notifier(log_t *log_ptr) {
     bool released = false;
 
     auto stop_condition = [&log, lsn, &released](bool wait) {
-
       LOG_SYNC_POINT("log_write_notifier_after_event_reset");
       if (released) {
         log_write_notifier_mutex_enter(log);
@@ -2406,8 +2419,14 @@ void log_write_notifier(log_t *log_ptr) {
 
       LOG_SYNC_POINT("log_write_notifier_before_check");
 
-      if (log.write_lsn.load() >= lsn || !log.writer_thread_alive.load()) {
+      if (log.write_lsn.load() >= lsn) {
         return (true);
+      }
+
+      if (log.should_stop_threads.load()) {
+        if (!log_writer_is_active()) {
+          return (true);
+        }
       }
 
       if (wait) {
@@ -2452,8 +2471,6 @@ void log_write_notifier(log_t *log_ptr) {
     }
   }
 
-  log.write_notifier_thread_alive.store(false);
-
   log_write_notifier_mutex_exit(log);
 }
 
@@ -2469,7 +2486,6 @@ void log_write_notifier(log_t *log_ptr) {
 
 void log_flush_notifier(log_t *log_ptr) {
   ut_a(log_ptr != nullptr);
-  ut_a(log_ptr->flush_notifier_thread_alive.load());
 
   log_t &log = *log_ptr;
   lsn_t lsn = log.flushed_to_disk_lsn.load() + 1;
@@ -2482,10 +2498,12 @@ void log_flush_notifier(log_t *log_ptr) {
                              srv_log_flush_notifier_timeout};
 
   for (uint64_t step = 0;; ++step) {
-    if (!log.flusher_thread_alive.load()) {
-      if (lsn > log.flushed_to_disk_lsn.load()) {
-        ut_a(lsn == log.flushed_to_disk_lsn.load() + 1);
-        break;
+    if (log.should_stop_threads.load()) {
+      if (!log_flusher_is_active()) {
+        if (lsn > log.flushed_to_disk_lsn.load()) {
+          ut_a(lsn == log.flushed_to_disk_lsn.load() + 1);
+          break;
+        }
       }
     }
 
@@ -2494,7 +2512,6 @@ void log_flush_notifier(log_t *log_ptr) {
     bool released = false;
 
     auto stop_condition = [&log, lsn, &released](bool wait) {
-
       LOG_SYNC_POINT("log_flush_notifier_after_event_reset");
       if (released) {
         log_flush_notifier_mutex_enter(log);
@@ -2503,9 +2520,14 @@ void log_flush_notifier(log_t *log_ptr) {
 
       LOG_SYNC_POINT("log_flush_notifier_before_check");
 
-      if (log.flushed_to_disk_lsn.load() >= lsn ||
-          !log.flusher_thread_alive.load()) {
+      if (log.flushed_to_disk_lsn.load() >= lsn) {
         return (true);
+      }
+
+      if (log.should_stop_threads.load()) {
+        if (!log_flusher_is_active()) {
+          return (true);
+        }
       }
 
       if (wait) {
@@ -2557,8 +2579,6 @@ void log_flush_notifier(log_t *log_ptr) {
     }
   }
 
-  log.flush_notifier_thread_alive.store(false);
-
   log_flush_notifier_mutex_exit(log);
 }
 
@@ -2574,7 +2594,6 @@ void log_flush_notifier(log_t *log_ptr) {
 
 void log_closer(log_t *log_ptr) {
   ut_a(log_ptr != nullptr);
-  ut_a(log_ptr->closer_thread_alive.load());
 
   log_t &log = *log_ptr;
   lsn_t end_lsn = 0;
@@ -2588,7 +2607,6 @@ void log_closer(log_t *log_ptr) {
     bool released = false;
 
     auto stop_condition = [&log, &released, step](bool wait) {
-
       if (released) {
         log_closer_mutex_enter(log);
         released = false;
@@ -2620,51 +2638,48 @@ void log_closer(log_t *log_ptr) {
     waiting.wait(stop_condition);
 
     /* Check if we should close the thread. */
-    if (log.should_stop_threads.load() && !log.flusher_thread_alive.load() &&
-        !log.writer_thread_alive.load()) {
-      end_lsn = log.write_lsn.load();
+    if (log.should_stop_threads.load()) {
+      if (!log_flusher_is_active() && !log_writer_is_active()) {
+        end_lsn = log.write_lsn.load();
 
-      ut_a(log_lsn_validate(end_lsn));
-      ut_a(end_lsn == log.flushed_to_disk_lsn.load());
-      ut_a(end_lsn == log_buffer_ready_for_write_lsn(log));
+        ut_a(log_lsn_validate(end_lsn));
+        ut_a(end_lsn == log.flushed_to_disk_lsn.load());
+        ut_a(end_lsn == log_buffer_ready_for_write_lsn(log));
 
-      ut_a(end_lsn >= log_buffer_dirty_pages_added_up_to_lsn(log));
+        ut_a(end_lsn >= log_buffer_dirty_pages_added_up_to_lsn(log));
 
-      if (log_buffer_dirty_pages_added_up_to_lsn(log) == end_lsn) {
-        /* All confirmed reservations have been written
-        to redo and all dirty pages related to those
-        writes have been added to flush lists.
+        if (log_buffer_dirty_pages_added_up_to_lsn(log) == end_lsn) {
+          /* All confirmed reservations have been written
+          to redo and all dirty pages related to those
+          writes have been added to flush lists.
 
-        However, there could be user threads, which are
-        in the middle of log_buffer_reserve(), reserved
-        range of sn values, but could not confirm.
+          However, there could be user threads, which are
+          in the middle of log_buffer_reserve(), reserved
+          range of sn values, but could not confirm.
 
-        Note that because log_writer is already not alive,
-        the only possible reason guaranteed by its death,
-        is that there is x-lock at end_lsn, in which case
-        end_lsn separates two regions in log buffer:
-        completely full and completely empty. */
-        const lsn_t ready_lsn = log_buffer_ready_for_write_lsn(log);
+          Note that because log_writer is already not alive,
+          the only possible reason guaranteed by its death,
+          is that there is x-lock at end_lsn, in which case
+          end_lsn separates two regions in log buffer:
+          completely full and completely empty. */
+          const lsn_t ready_lsn = log_buffer_ready_for_write_lsn(log);
 
-        const lsn_t current_lsn = log_get_lsn(log);
+          const lsn_t current_lsn = log_get_lsn(log);
 
-        if (current_lsn > ready_lsn) {
-          log.recent_written.validate_no_links(ready_lsn, current_lsn);
+          if (current_lsn > ready_lsn) {
+            log.recent_written.validate_no_links(ready_lsn, current_lsn);
 
-          log.recent_closed.validate_no_links(ready_lsn, current_lsn);
+            log.recent_closed.validate_no_links(ready_lsn, current_lsn);
+          }
+
+          break;
         }
-
-        break;
+        /* We need to wait until remaining dirty pages
+        have been added. */
       }
-
-      /* We need to wait until remaining dirty pages
-      have been added. */
+      /* We prefer to wait until all writing is done. */
     }
   }
-
-  log.closer_thread_alive.store(false);
-
-  os_event_set(log.checkpointer_event);
 
   log_closer_mutex_exit(log);
 }
@@ -2695,8 +2710,7 @@ bool log_read_encryption() {
   log_block_buf =
       static_cast<byte *>(ut_align(log_block_buf_ptr, OS_FILE_LOG_BLOCK_SIZE));
 
-  err = fil_redo_io(IORequestLogRead, page_id, univ_page_size,
-                    LOG_CHECKPOINT_1 + OS_FILE_LOG_BLOCK_SIZE,
+  err = fil_redo_io(IORequestLogRead, page_id, univ_page_size, LOG_ENCRYPTION,
                     OS_FILE_LOG_BLOCK_SIZE, log_block_buf);
 
   ut_a(err == DB_SUCCESS);
@@ -2712,12 +2726,12 @@ bool log_read_encryption() {
     }
 
     if (Encryption::decode_encryption_info(
-            key, iv, log_block_buf + LOG_HEADER_CREATOR_END)) {
+            key, iv, log_block_buf + LOG_HEADER_CREATOR_END, true)) {
       /* If redo log encryption is enabled, set the
       space flag. Otherwise, we just fill the encryption
       information to space object for decrypting old
       redo log blocks. */
-      FSP_FLAGS_SET_ENCRYPTION(space->flags);
+      fsp_flags_set_encryption(space->flags);
       err = fil_set_encryption(space->id, Encryption::AES, key, iv);
 
       if (err == DB_SUCCESS) {
@@ -2745,11 +2759,12 @@ bool log_read_encryption() {
   return (true);
 }
 
-static bool log_file_header_fill_encryption(byte *buf, byte *key, byte *iv,
-                                            bool is_boot) {
+bool log_file_header_fill_encryption(byte *buf, byte *key, byte *iv,
+                                     bool is_boot, bool encrypt_key) {
   byte encryption_info[ENCRYPTION_INFO_SIZE];
 
-  if (!Encryption::fill_encryption_info(key, iv, encryption_info, is_boot)) {
+  if (!Encryption::fill_encryption_info(key, iv, encryption_info, is_boot,
+                                        encrypt_key)) {
     return (false);
   }
 
@@ -2778,14 +2793,13 @@ bool log_write_encryption(byte *key, byte *iv, bool is_boot) {
     iv = space->encryption_iv;
   }
 
-  if (!log_file_header_fill_encryption(log_block_buf, key, iv, is_boot)) {
+  if (!log_file_header_fill_encryption(log_block_buf, key, iv, is_boot, true)) {
     ut_free(log_block_buf_ptr);
     return (false);
   }
 
   auto err = fil_redo_io(IORequestLogWrite, page_id, univ_page_size,
-                         LOG_CHECKPOINT_1 + OS_FILE_LOG_BLOCK_SIZE,
-                         OS_FILE_LOG_BLOCK_SIZE, log_block_buf);
+                         LOG_ENCRYPTION, OS_FILE_LOG_BLOCK_SIZE, log_block_buf);
 
   ut_a(err == DB_SUCCESS);
 
@@ -2804,50 +2818,11 @@ bool log_rotate_encryption() {
   return (log_write_encryption(nullptr, nullptr, false));
 }
 
-void log_enable_encryption_if_set() {
+void redo_rotate_default_master_key() {
   fil_space_t *space = fil_space_get(dict_sys_t::s_log_space_first_id);
 
-  if (srv_shutdown_state != SRV_SHUTDOWN_NONE) {
+  if (srv_shutdown_state.load() != SRV_SHUTDOWN_NONE) {
     return;
-  }
-
-  /* Check encryption for redo log is enabled or not. If it's
-  enabled, we will start to encrypt the redo log block from now on.
-  Note: We need the server_uuid initialized, otherwise, the keyname will
-  not contains server uuid. */
-  if (srv_redo_log_encrypt && !FSP_FLAGS_GET_ENCRYPTION(space->flags) &&
-      strlen(server_uuid) > 0) {
-    dberr_t err;
-    byte key[ENCRYPTION_KEY_LEN];
-    byte iv[ENCRYPTION_KEY_LEN];
-
-    if (srv_read_only_mode) {
-      srv_redo_log_encrypt = false;
-      ib::error(ER_IB_MSG_1242) << "Can't set redo log tablespace to be"
-                                << " encrypted in read-only mode.";
-      return;
-    }
-
-    Encryption::random_value(key);
-    Encryption::random_value(iv);
-    if (!log_write_encryption(key, iv, false)) {
-      srv_redo_log_encrypt = false;
-      ib::error(ER_IB_MSG_1243) << "Can't set redo log"
-                                << " tablespace to be"
-                                << " encrypted.";
-    } else {
-      FSP_FLAGS_SET_ENCRYPTION(space->flags);
-      err = fil_set_encryption(space->id, Encryption::AES, key, iv);
-      if (err != DB_SUCCESS) {
-        srv_redo_log_encrypt = false;
-        ib::warn(ER_IB_MSG_1244) << "Can't set redo log"
-                                 << " tablespace to be"
-                                 << " encrypted.";
-      } else {
-        ib::info(ER_IB_MSG_1245) << "Redo log encryption is"
-                                 << " enabled.";
-      }
-    }
   }
 
   /* If the redo log space is using default key, rotate it.
@@ -2861,6 +2836,6 @@ void log_enable_encryption_if_set() {
   }
 }
 
-  /* @} */
+/* @} */
 
 #endif /* !UNIV_HOTBACKUP */

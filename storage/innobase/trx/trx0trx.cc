@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2018, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 1996, 2019, Oracle and/or its affiliates. All Rights Reserved.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
@@ -38,6 +38,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include <sql_thd_internal_api.h>
 
 #include "btr0sea.h"
+#include "clone0clone.h"
 #include "dict0dd.h"
 #include "fsp0sysspace.h"
 #include "ha_prototypes.h"
@@ -64,6 +65,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 
 #include "my_dbug.h"
 #include "mysql/plugin.h"
+#include "sql/clone_handler.h"
 
 static const ulint MAX_DETAILED_ERROR_LEN = 256;
 
@@ -144,6 +146,8 @@ static void trx_init(trx_t *trx) {
 
   trx->no = TRX_ID_MAX;
 
+  trx->persists_gtid = false;
+
   trx->skip_lock_inheritance = false;
 
   trx->is_recovered = false;
@@ -156,7 +160,7 @@ static void trx_init(trx_t *trx) {
 
   trx->check_unique_secondary = true;
 
-  trx->lock.n_rec_locks = 0;
+  trx->lock.n_rec_locks.store(0);
 
   trx->dict_operation = TRX_DICT_OP_NONE;
 
@@ -177,6 +181,8 @@ static void trx_init(trx_t *trx) {
   trx->auto_commit = false;
 
   trx->will_lock = 0;
+
+  trx->lock.inherit_all.store(false);
 
   trx->internal = false;
 
@@ -203,6 +209,8 @@ static void trx_init(trx_t *trx) {
 
   trx->lock.table_cached = 0;
 
+  trx->error_index = nullptr;
+
   /* During asynchronous rollback, we should reset forced rollback flag
   only after rollback is complete to avoid race with the thread owning
   the transaction. */
@@ -216,12 +224,6 @@ static void trx_init(trx_t *trx) {
 
     trx->in_innodb &= TRX_FORCE_ROLLBACK_MASK;
   }
-
-  /* Note: It's possible that this list is not empty if a transaction
-  was interrupted after it collected the victim transactions and before
-  it got a chance to roll them back asynchronously. */
-
-  trx->hit_list.clear();
 
   trx->flush_observer = NULL;
 
@@ -247,8 +249,6 @@ struct TrxFactory {
     new (&trx->lock.table_pool) lock_pool_t();
 
     new (&trx->lock.table_locks) lock_pool_t();
-
-    new (&trx->hit_list) hit_list_t();
 
     trx_init(trx);
 
@@ -323,8 +323,6 @@ struct TrxFactory {
     trx->lock.table_pool.~lock_pool_t();
 
     trx->lock.table_locks.~lock_pool_t();
-
-    trx->hit_list.~hit_list_t();
   }
 
   /** Enforce any invariants here, this is called before the transaction
@@ -360,9 +358,9 @@ struct TrxFactory {
 
     ut_ad(trx->lock.table_locks.empty());
 
-    ut_ad(!trx->abort);
+    ut_ad(!trx->lock.inherit_all.load());
 
-    ut_ad(trx->hit_list.empty());
+    ut_ad(!trx->abort);
 
     ut_ad(trx->killed_by == 0);
 
@@ -445,6 +443,8 @@ static trx_t *trx_create_low() {
 
   /* We just got trx from pool, it should be non locking */
   ut_ad(trx->will_lock == 0);
+
+  trx->persists_gtid = false;
 
   trx->api_trx = false;
 
@@ -871,12 +871,29 @@ static void trx_resurrect_update(
     trx_undo_t *undo, /*!< in/out: update UNDO record */
     trx_rseg_t *rseg) /*!< in/out: rollback segment */
 {
-  rseg->trx_ref_count++;
-  trx->rsegs.m_redo.rseg = rseg;
-  *trx->xid = undo->xid;
-  trx->id = undo->trx_id;
+  /* This resurected transaction might also have been doing inserts.
+  If so, this rseg is already assigned by trx_resurrect_insert(). */
+  if (trx->rsegs.m_redo.rseg != nullptr) {
+    ut_a(trx->rsegs.m_redo.rseg == rseg);
+    ut_ad(trx->id == undo->trx_id);
+    ut_ad(trx->is_recovered);
+    /* For GTID persistence, we might have empty update undo for
+    insert only transactions. */
+    if (undo->empty && trx_state_eq(trx, TRX_STATE_PREPARED)) {
+      undo->set_prepared(trx->xid);
+    }
+    ut_ad(undo->xid.eq(trx->xid));
+  } else {
+    rseg->trx_ref_count++;
+    trx->rsegs.m_redo.rseg = rseg;
+    *trx->xid = undo->xid;
+    trx->id = undo->trx_id;
+    trx->is_recovered = true;
+  }
+
+  /* Assign the update_undo segment. */
+  ut_a(trx->rsegs.m_redo.update_undo == nullptr);
   trx->rsegs.m_redo.update_undo = undo;
-  trx->is_recovered = true;
 
   /* This is single-threaded startup code, we do not need the
   protection of trx->mutex or trx_sys->mutex here. */
@@ -901,6 +918,12 @@ static void trx_resurrect_update(
   start time here.*/
   if (trx->state == TRX_STATE_ACTIVE || trx->state == TRX_STATE_PREPARED) {
     trx->start_time = ut_time();
+  }
+
+  trx->ddl_operation = undo->dict_operation;
+
+  if (undo->dict_operation) {
+    trx_set_dict_operation(trx, TRX_DICT_OP_TABLE);
   }
 
   if (!undo->empty && undo->top_undo_no >= trx->undo_no) {
@@ -998,11 +1021,6 @@ void trx_lists_init_at_db_start(void) {
   // 给更新了
   for (TrxIdSet::iterator it = trx_sys->rw_trx_set.begin(); it != end; ++it) {
     ut_ad(it->m_trx->in_rw_trx_list);
-#ifdef UNIV_DEBUG
-    if (it->m_trx->id > trx_sys->rw_max_trx_id) {
-      trx_sys->rw_max_trx_id = it->m_trx->id;
-    }
-#endif /* UNIV_DEBUG */
 
     // 这里也同时更新活跃事务数组, 如果这个事务是状态是ACTIVE 或者 PREPARED
     // 就把这个事务加到活跃事务数组中去
@@ -1201,7 +1219,6 @@ static void trx_start_low(
 {
   ut_ad(!trx->in_rollback);
   ut_ad(!trx->is_recovered);
-  ut_ad(trx->hit_list.empty());
   ut_ad(trx->start_line != 0);
   ut_ad(trx->start_file != 0);
   ut_ad(trx->roll_limit == 0);
@@ -1229,6 +1246,7 @@ static void trx_start_low(
   } else if (trx->will_lock == 0) {
     trx->read_only = true;
   }
+  trx->persists_gtid = false;
 
 #ifdef UNIV_DEBUG
   /* If the transaction is DD attachable trx, it should be AC-NL-RO
@@ -1297,11 +1315,6 @@ static void trx_start_low(
     UT_LIST_ADD_FIRST(trx_sys->rw_trx_list, trx);
 
     ut_d(trx->in_rw_trx_list = true);
-#ifdef UNIV_DEBUG
-    if (trx->id > trx_sys->rw_max_trx_id) {
-      trx_sys->rw_max_trx_id = trx->id;
-    }
-#endif /* UNIV_DEBUG */
 
     trx->state = TRX_STATE_ACTIVE;
 
@@ -1383,6 +1396,9 @@ static bool trx_serialisation_number_get(
 
   // 这里可以看出, 在将要commit 的时候才会对trx->no 进行赋值
   trx->no = trx_sys_get_new_trx_id();
+
+  /* Update the latest transaction number. */
+  ut_d(trx_sys->rw_max_trx_no = trx->no);
 
   /* Track the minimum serialisation number. */
   // 将当前trx 加入到 serialisation_list 中
@@ -1510,9 +1526,13 @@ static bool trx_write_serialisation_history(
       with same trx-no as single unit. */
       bool update_rseg_len = !(trx->rsegs.m_noredo.update_undo != NULL);
 
+      /* Set flag if GTID information need to persist. */
+      auto undo_ptr = &trx->rsegs.m_redo;
+      trx_undo_gtid_set(trx, undo_ptr->update_undo);
+
       // undo log cleanup 时机为什么是在这个时候
-      trx_undo_update_cleanup(trx, &trx->rsegs.m_redo, undo_hdr_page,
-                              update_rseg_len, (update_rseg_len ? 1 : 0), mtr);
+      trx_undo_update_cleanup(trx, undo_ptr, undo_hdr_page, update_rseg_len,
+                              (update_rseg_len ? 1 : 0), mtr);
     }
 
     DBUG_EXECUTE_IF("ib_trx_crash_during_commit", DBUG_SUICIDE(););
@@ -1543,16 +1563,11 @@ static bool trx_write_serialisation_history(
 
   MONITOR_INC(MONITOR_TRX_COMMIT_UNDO);
 
-  /* Update the latest MySQL binlog name and offset info
-  in trx sys header if MySQL binlogging is on or the database
-  server is a MySQL replication slave */
-
-  if (trx->mysql_log_file_name != NULL && trx->mysql_log_file_name[0] != '\0') {
-    trx_sys_update_mysql_binlog_offset(trx->mysql_log_file_name,
-                                       trx->mysql_log_offset,
-                                       TRX_SYS_MYSQL_LOG_INFO, mtr);
-
-    trx->mysql_log_file_name = NULL;
+  /* Update the latest MySQL binlog name and offset information
+  in trx sys header only if MySQL binary logging is on and clone
+  is has ensured commit order at final stage. */
+  if (Clone_handler::need_commit_order()) {
+    trx_sys_update_mysql_binlog_offset(trx, mtr);
   }
 
   return (serialised);
@@ -1621,9 +1636,8 @@ static void trx_finalize_for_fts(
 
 /** If required, flushes the log to disk based on the value of
  innodb_flush_log_at_trx_commit. */
-static void trx_flush_log_if_needed_low(
-    lsn_t lsn) /*!< in: lsn up to which logs are to be
-               flushed. */
+static void trx_flush_log_if_needed_low(lsn_t lsn) /*!< in: lsn up to which logs
+                                                   are to be flushed. */
 {
 #ifdef _WIN32
   bool flush = true;
@@ -1653,10 +1667,9 @@ static void trx_flush_log_if_needed_low(
 
 /** If required, flushes the log to disk based on the value of
  innodb_flush_log_at_trx_commit. */
-static void trx_flush_log_if_needed(
-    lsn_t lsn,  /*!< in: lsn up to which logs are to be
-                flushed. */
-    trx_t *trx) /*!< in/out: transaction */
+static void trx_flush_log_if_needed(lsn_t lsn, /*!< in: lsn up to which logs are
+                                               to be flushed. */
+                                    trx_t *trx) /*!< in/out: transaction */
 {
   trx->op_info = "flushing log";
 
@@ -1705,14 +1718,25 @@ Erase the transaction from running transaction lists and serialization
 list. Active RW transaction list of a MVCC snapshot(ReadView::prepare)
 won't include this transaction after this call. All implicit locks are
 also released by this call as trx is removed from rw_trx_list.
-@param[in] trx		Transaction to erase, must have an ID > 0
-@param[in] serialised	true if serialisation log was written */
-static void trx_erase_lists(trx_t *trx, bool serialised) {
+@param[in]	trx		Transaction to erase, must have an ID > 0
+@param[in]	serialised	true if serialisation log was written
+@param[in]	gtid_desc	GTID information to persist */
+static void trx_erase_lists(trx_t *trx, bool serialised, Gtid_desc &gtid_desc) {
   ut_ad(trx->id > 0);
   ut_ad(trx_sys_mutex_own());
 
   if (serialised) {
     UT_LIST_REMOVE(trx_sys->serialisation_list, trx);
+
+    /* Add GTID to be persisted to disk table. It must be done ...
+    1.After the transaction is marked committed in undo. Otherwise
+      GTID might get committed before the transaction commit on disk.
+    2.Before it is removed from serialization list. Otherwise the transaction
+      undo could get purged before persisting GTID on disk table. */
+    if (gtid_desc.m_is_set) {
+      auto &gtid_persistor = clone_sys->get_gtid_persistor();
+      gtid_persistor.add(gtid_desc);
+    }
   }
 
   trx_ids_t::iterator it = std::lower_bound(trx_sys->rw_trx_ids.begin(),
@@ -1749,6 +1773,11 @@ static void trx_release_impl_and_expl_locks(trx_t *trx, bool serialized) {
   bool trx_sys_latch_is_needed =
       (trx->id > 0) || trx_state_eq(trx, TRX_STATE_PREPARED);
 
+  /* Check and get GTID to be persisted. Do it outside trx_sys mutex. */
+  Gtid_desc gtid_desc;
+  auto &gtid_persistor = clone_sys->get_gtid_persistor();
+  gtid_persistor.get_gtid_info(trx, gtid_desc);
+
   if (trx_sys_latch_is_needed) {
     trx_sys_mutex_enter();
   }
@@ -1757,7 +1786,7 @@ static void trx_release_impl_and_expl_locks(trx_t *trx, bool serialized) {
     /* For consistent snapshot, we need to remove current
     transaction from running transaction id list for mvcc
     before doing commit and releasing locks. */
-    trx_erase_lists(trx, serialized);
+    trx_erase_lists(trx, serialized, gtid_desc);
   }
 
   if (trx_state_eq(trx, TRX_STATE_PREPARED)) {
@@ -1871,6 +1900,10 @@ written */
     the atomic counter. */
     rseg->trx_ref_count--;
   }
+
+  /* Reset flag that SE persists GTID. */
+  auto &gtid_persistor = clone_sys->get_gtid_persistor();
+  gtid_persistor.set_persist_gtid(trx, false);
 
   if (mtr != NULL) {
     if (trx->rsegs.m_redo.insert_undo != NULL) {
@@ -2033,13 +2066,20 @@ void trx_commit_low(
 
     /*--------------*/
     // 这里在执行了mtr_commit 之后, 事务相关的内容在文件中的操作已经完成了
+    DBUG_EXECUTE_IF("trx_commit_to_the_end_of_log_block", {
+      const size_t space_left = mtr->get_expected_log_size();
+      mtr_commit_mlog_test_filling_block(*log_sys, space_left);
+    });
+
     mtr_commit(mtr);
 
-    DBUG_EXECUTE_IF("ib_crash_during_trx_commit_in_mem",
-                    if (trx_is_rseg_updated(trx)) {
-                      log_make_latest_checkpoint();
-                      DBUG_SUICIDE();
-                    });
+    DBUG_PRINT("trx_commit", ("commit lsn at " LSN_PF, mtr->commit_lsn()));
+
+    DBUG_EXECUTE_IF(
+        "ib_crash_during_trx_commit_in_mem", if (trx_is_rseg_updated(trx)) {
+          log_make_latest_checkpoint();
+          DBUG_SUICIDE();
+        });
     /*--------------*/
 
   } else {
@@ -2259,6 +2299,8 @@ dberr_t trx_commit_for_mysql(trx_t *trx) /*!< in/out: transaction */
   sig to the transaction, we must here make sure that trx has been
   started. */
 
+  dberr_t db_err = DB_SUCCESS;
+
   switch (trx->state) {
     case TRX_STATE_NOT_STARTED:
     case TRX_STATE_FORCED_ROLLBACK:
@@ -2270,8 +2312,16 @@ dberr_t trx_commit_for_mysql(trx_t *trx) /*!< in/out: transaction */
       /* fall through */
     case TRX_STATE_ACTIVE:
     case TRX_STATE_PREPARED:
-
       trx->op_info = "committing";
+
+      /* For GTID persistence we need update undo segment. */
+      db_err = trx_undo_gtid_add_update_undo(trx, false, false);
+      if (db_err != DB_SUCCESS) {
+        return (db_err);
+      }
+
+      /* Flush prepare GTID for XA prepared transactions. */
+      trx_undo_gtid_flush_prepare(trx);
 
       if (trx->id != 0) {
         trx_update_mod_tables_timestamp(trx);
@@ -2312,6 +2362,8 @@ void trx_commit_complete_for_mysql(trx_t *trx) /*!< in/out: transaction */
 void trx_mark_sql_stat_end(trx_t *trx) /*!< in: trx handle */
 {
   ut_a(trx);
+
+  lock_on_statement_end(trx);
 
   switch (trx->state) {
     case TRX_STATE_PREPARED:
@@ -2614,6 +2666,9 @@ static lsn_t trx_prepare_low(
     }
 
     if (undo_ptr->update_undo != NULL) {
+      if (!noredo_logging) {
+        trx_undo_gtid_set(trx, undo_ptr->update_undo);
+      }
       trx_undo_set_state_at_prepare(trx, undo_ptr->update_undo, false, &mtr);
     }
 
@@ -2635,12 +2690,17 @@ static lsn_t trx_prepare_low(
   return 0;
 }
 
+bool trx_is_mysql_xa(trx_t *trx) {
+  auto my_xid = trx->xid->get_my_xid();
+  return (my_xid != 0);
+}
+
 /** Prepares a transaction. */
 static void trx_prepare(trx_t *trx) /*!< in/out: transaction */
 {
   /* This transaction has crossed the point of no return and cannot
   be rolled back asynchronously now. It must commit or rollback
-  synhronously. */
+  synchronously. */
 
   lsn_t lsn = 0;
 
@@ -2658,13 +2718,25 @@ static void trx_prepare(trx_t *trx) /*!< in/out: transaction */
     trx_prepare_low(trx, &trx->rsegs.m_noredo, true);
   }
 
+  /* Check and get GTID to be persisted. Do it outside trx_sys mutex. */
+  auto &gtid_persistor = clone_sys->get_gtid_persistor();
+  Gtid_desc gtid_desc;
+  gtid_persistor.get_gtid_info(trx, gtid_desc);
+
   /*--------------------------------------*/
   ut_a(trx->state == TRX_STATE_ACTIVE);
   trx_sys_mutex_enter();
   trx->state = TRX_STATE_PREPARED;
   trx_sys->n_prepared_trx++;
+  /* Add GTID to be persisted to disk table, if needed. */
+  if (gtid_desc.m_is_set) {
+    gtid_persistor.add(gtid_desc);
+  }
   trx_sys_mutex_exit();
   /*--------------------------------------*/
+
+  /* Reset after successfully adding GTID to in memory table. */
+  trx->persists_gtid = false;
 
   /* Force isolation level to RC and release GAP locks
   for test purpose. */
@@ -2726,6 +2798,12 @@ dberr_t trx_prepare_for_mysql(trx_t *trx) {
 
   if (trx_in_innodb.is_aborted() && trx->killed_by != os_thread_get_curr_id()) {
     return (DB_FORCED_ABORT);
+  }
+
+  /* For GTID persistence we need update undo segment. */
+  auto db_err = trx_undo_gtid_add_update_undo(trx, true, false);
+  if (db_err != DB_SUCCESS) {
+    return (db_err);
   }
 
   trx->op_info = "preparing";
@@ -3041,12 +3119,6 @@ void trx_set_rw_mode(trx_t *trx) /*!< in/out: transaction that is RW */
     MVCC::set_view_creator_trx_id(trx->read_view, trx->id);
   }
 
-#ifdef UNIV_DEBUG
-  if (trx->id > trx_sys->rw_max_trx_id) {
-    trx_sys->rw_max_trx_id = trx->id;
-  }
-#endif /* UNIV_DEBUG */
-
   UT_LIST_ADD_FIRST(trx_sys->rw_trx_list, trx);
 
   ut_d(trx->in_rw_trx_list = true);
@@ -3054,12 +3126,13 @@ void trx_set_rw_mode(trx_t *trx) /*!< in/out: transaction that is RW */
   mutex_exit(&trx_sys->mutex);
 }
 
-/**
-Kill all transactions that are blocking this transaction from acquiring locks.
-@param[in,out] trx	High priority transaction */
-
 void trx_kill_blocking(trx_t *trx) {
-  if (trx->hit_list.empty()) {
+  if (!trx_is_high_priority(trx)) {
+    return;
+  }
+  hit_list_t hit_list;
+  lock_make_trx_hit_list(trx, hit_list);
+  if (hit_list.empty()) {
     return;
   }
 
@@ -3089,10 +3162,9 @@ void trx_kill_blocking(trx_t *trx) {
   ut_a(trx->dict_operation_lock_mode == 0);
 
   /** Kill the transactions in the lock acquisition order old -> new. */
-  hit_list_t::reverse_iterator end = trx->hit_list.rend();
+  hit_list_t::reverse_iterator end = hit_list.rend();
 
-  for (hit_list_t::reverse_iterator it = trx->hit_list.rbegin(); it != end;
-       ++it) {
+  for (hit_list_t::reverse_iterator it = hit_list.rbegin(); it != end; ++it) {
     trx_t *victim_trx = it->m_trx;
     ulint version = it->m_version;
 
@@ -3204,9 +3276,24 @@ void trx_kill_blocking(trx_t *trx) {
     trx_mutex_exit(victim_trx);
   }
 
-  trx->hit_list.clear();
-
   if (had_dict_lock) {
     row_mysql_freeze_data_dictionary(trx);
   }
+}
+
+/* To get current session thread default THD */
+THD *thd_get_current_thd();
+
+void trx_sys_update_binlog_position(trx_t *trx) {
+  THD *thd = trx->mysql_thd;
+  /* For XA commit/rollback by XID, transaction thd could be null. */
+  if (thd == nullptr) {
+    thd = thd_get_current_thd();
+    if (thd == nullptr) {
+      return;
+    }
+  }
+  ulonglong pos;
+  thd_binlog_pos(thd, &trx->mysql_log_file_name, &pos);
+  trx->mysql_log_offset = static_cast<uint64_t>(pos);
 }

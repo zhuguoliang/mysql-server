@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 2012, 2018, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 2012, 2019, Oracle and/or its affiliates. All Rights Reserved.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
@@ -166,17 +166,16 @@ static MY_ATTRIBUTE((warn_unused_result)) dberr_t
 /** Write the meta data config file index information.
  @return DB_SUCCESS or error code. */
 static MY_ATTRIBUTE((nonnull, warn_unused_result)) dberr_t
-    row_quiesce_write_indexes(
-        const dict_table_t *table, /*!< in: write the meta data for
-                                   this table */
-        FILE *file,                /*!< in: file to write to */
-        THD *thd)                  /*!< in/out: session */
+    row_quiesce_write_indexes(const dict_table_t *table, /*!< in: write the meta
+                                                         data for this table */
+                              FILE *file, /*!< in: file to write to */
+                              THD *thd)   /*!< in/out: session */
 {
   byte row[sizeof(uint32_t)];
 
   /* Write the number of indexes in the table. */
   uint32_t num_indexes = 0;
-  ulint flags = fil_space_get_flags(table->space);
+  uint32_t flags = fil_space_get_flags(table->space);
   bool has_sdi = FSP_FLAGS_HAS_SDI(flags);
 
   if (has_sdi) {
@@ -267,11 +266,11 @@ static MY_ATTRIBUTE((warn_unused_result)) dberr_t
  dict_col_t structure, along with the column name. All fields are serialized
  as ib_uint32_t.
  @return DB_SUCCESS or error code. */
-static MY_ATTRIBUTE((warn_unused_result)) dberr_t row_quiesce_write_table(
-    const dict_table_t *table, /*!< in: write the meta data for
-                               this table */
-    FILE *file,                /*!< in: file to write to */
-    THD *thd)                  /*!< in/out: session */
+static MY_ATTRIBUTE((warn_unused_result)) dberr_t
+    row_quiesce_write_table(const dict_table_t *table, /*!< in: write the meta
+                                                       data for this table */
+                            FILE *file, /*!< in: file to write to */
+                            THD *thd)   /*!< in/out: session */
 {
   dict_col_t *col;
   byte row[sizeof(ib_uint32_t) * 7];
@@ -345,11 +344,11 @@ static MY_ATTRIBUTE((warn_unused_result)) dberr_t row_quiesce_write_table(
 
 /** Write the meta data config file header.
  @return DB_SUCCESS or error code. */
-static MY_ATTRIBUTE((warn_unused_result)) dberr_t row_quiesce_write_header(
-    const dict_table_t *table, /*!< in: write the meta data for
-                               this table */
-    FILE *file,                /*!< in: file to write to */
-    THD *thd)                  /*!< in/out: session */
+static MY_ATTRIBUTE((warn_unused_result)) dberr_t
+    row_quiesce_write_header(const dict_table_t *table, /*!< in: write the meta
+                                                        data for this table */
+                             FILE *file, /*!< in: file to write to */
+                             THD *thd)   /*!< in/out: session */
 {
   byte value[sizeof(ib_uint32_t)];
 
@@ -446,8 +445,8 @@ static MY_ATTRIBUTE((warn_unused_result)) dberr_t row_quiesce_write_header(
   }
 
   /* Write the space flags */
-  ulint space_flags = fil_space_get_flags(table->space);
-  ut_ad(space_flags != ULINT_UNDEFINED);
+  uint32_t space_flags = fil_space_get_flags(table->space);
+  ut_ad(space_flags != UINT32_UNDEFINED);
   mach_write_to_4(value, space_flags);
 
   if (fwrite(&value, 1, sizeof(value), file) != sizeof(value)) {

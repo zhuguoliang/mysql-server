@@ -1,4 +1,4 @@
-/* Copyright (c) 2002, 2018, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2002, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -54,7 +54,6 @@ This file contains the implementation of error and warnings related
 #include <stdarg.h>
 #include <algorithm>
 
-#include "binary_log_types.h"
 #include "decimal.h"
 #include "my_dbug.h"
 #include "my_inttypes.h"
@@ -204,7 +203,7 @@ using std::min;
 static void copy_string(MEM_ROOT *mem_root, String *dst, const String *src) {
   size_t len = src->length();
   if (len) {
-    char *copy = (char *)alloc_root(mem_root, len + 1);
+    char *copy = (char *)mem_root->Alloc(len + 1);
     if (copy) {
       memcpy(copy, src->ptr(), len);
       copy[len] = '\0';
@@ -727,10 +726,10 @@ void push_deprecated_warn_no_replacement(THD *thd, const char *old_syntax) {
     LogErr(WARNING_LEVEL, ER_DEPRECATED_SYNTAX_NO_REPLACEMENT, old_syntax);
 }
 
-const LEX_STRING warning_level_names[] = {{C_STRING_WITH_LEN("Note")},
-                                          {C_STRING_WITH_LEN("Warning")},
-                                          {C_STRING_WITH_LEN("Error")},
-                                          {C_STRING_WITH_LEN("?")}};
+const LEX_CSTRING warning_level_names[] = {{STRING_WITH_LEN("Note")},
+                                           {STRING_WITH_LEN("Warning")},
+                                           {STRING_WITH_LEN("Error")},
+                                           {STRING_WITH_LEN("?")}};
 
 /**
   Send all notes, errors or warnings to the client in a result set. The function
@@ -832,7 +831,7 @@ ErrConvString::ErrConvString(const my_decimal *nr) {
 
 ErrConvString::ErrConvString(const MYSQL_TIME *ltime, uint dec) {
   buf_length =
-      my_TIME_to_str(ltime, err_buffer, MY_MIN(dec, DATETIME_MAX_DECIMALS));
+      my_TIME_to_str(*ltime, err_buffer, MY_MIN(dec, DATETIME_MAX_DECIMALS));
 }
 
 /**
@@ -933,7 +932,8 @@ size_t convert_error_message(char *to, size_t to_length,
 
   wc_mb = to_cs->cset->wc_mb;
   while (1) {
-    if ((cnvres = (*mb_wc)(from_cs, &wc, (uchar *)from, from_end)) > 0) {
+    if ((cnvres = (*mb_wc)(from_cs, &wc, pointer_cast<const uchar *>(from),
+                           from_end)) > 0) {
       if (!wc) break;
       from += cnvres;
     } else if (cnvres == MY_CS_ILSEQ) {

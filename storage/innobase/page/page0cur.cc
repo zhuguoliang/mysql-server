@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1994, 2018, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 1994, 2019, Oracle and/or its affiliates. All Rights Reserved.
 Copyright (c) 2012, Facebook Inc.
 
 This program is free software; you can redistribute it and/or modify it under
@@ -57,7 +57,7 @@ static ulint page_cur_short_succ = 0;
  being used are:
  X[n+1] = (a * X[n] + c) mod m
  where:
- X[0] = ut_time_us(NULL)
+ X[0] = ut_time_monotonic_us()
  a = 1103515245 (3^5 * 5 * 7 * 129749)
  c = 12345 (3 * 5 * 823)
  m = 18446744073709551616 (2^64)
@@ -70,7 +70,7 @@ static ib_uint64_t page_cur_lcg_prng(void) {
   static ibool initialized = FALSE;
 
   if (!initialized) {
-    lcg_current = (ib_uint64_t)ut_time_us(NULL);
+    lcg_current = (ib_uint64_t)ut_time_monotonic_us();
     initialized = TRUE;
   }
 
@@ -117,7 +117,7 @@ bool page_cur_try_search_shortcut(
 
   low_match = up_match = std::min(*ilow_matched_fields, *iup_matched_fields);
 
-  if (cmp_dtuple_rec_with_match(tuple, rec, index, offsets, &low_match) < 0) {
+  if (tuple->compare(rec, index, offsets, &low_match) < 0) {
     goto exit_func;
   }
 
@@ -126,8 +126,7 @@ bool page_cur_try_search_shortcut(
     offsets = rec_get_offsets(next_rec, index, offsets,
                               dtuple_get_n_fields(tuple), &heap);
 
-    if (cmp_dtuple_rec_with_match(tuple, next_rec, index, offsets, &up_match) >=
-        0) {
+    if (tuple->compare(next_rec, index, offsets, &up_match) >= 0) {
       goto exit_func;
     }
 
@@ -448,8 +447,8 @@ void page_cur_search_with_match(
     }
   }
 
-    /* The following flag does not work for non-latin1 char sets because
-    cmp_full_field does not tell how many bytes matched */
+  /* The following flag does not work for non-latin1 char sets because
+  cmp_full_field does not tell how many bytes matched */
 #ifdef PAGE_CUR_LE_OR_EXTENDS
   ut_a(mode != PAGE_CUR_LE_OR_EXTENDS);
 #endif /* PAGE_CUR_LE_OR_EXTENDS */
@@ -493,8 +492,11 @@ void page_cur_search_with_match(
 
     // 将这个dtuple 和 rec_t 进行比较
     // 在cmp_dtuple_rec_with_match 中, 会对dtuple_t 中的field 一个一个的比较
-    cmp = cmp_dtuple_rec_with_match(tuple, mid_rec, index, offsets,
-                                    &cur_matched_fields);
+    //
+    // 原来是cmp_dtuple_rec_with_match, 后来改成了tuple->
+    // cmp = cmp_dtuple_rec_with_match(tuple, mid_rec, index, offsets,
+    //                                 &cur_matched_fields);
+    cmp = tuple->compare(mid_rec, index, offsets, &cur_matched_fields);
 
     if (cmp > 0) {
     low_slot_match:
@@ -548,8 +550,7 @@ void page_cur_search_with_match(
                                 dtuple_get_n_fields_cmp(tuple), &heap);
     }
 
-    cmp = cmp_dtuple_rec_with_match(tuple, mid_rec, index, offsets,
-                                    &cur_matched_fields);
+    cmp = tuple->compare(mid_rec, index, offsets, &cur_matched_fields);
 
     if (cmp > 0) {
     low_rec_match:
@@ -685,8 +686,8 @@ void page_cur_search_with_match_bytes(
 #endif
 #endif
 
-    /* The following flag does not work for non-latin1 char sets because
-    cmp_full_field does not tell how many bytes matched */
+  /* The following flag does not work for non-latin1 char sets because
+  cmp_full_field does not tell how many bytes matched */
 #ifdef PAGE_CUR_LE_OR_EXTENDS
   ut_a(mode != PAGE_CUR_LE_OR_EXTENDS);
 #endif /* PAGE_CUR_LE_OR_EXTENDS */

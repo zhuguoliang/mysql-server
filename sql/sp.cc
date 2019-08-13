@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2002, 2018, Oracle and/or its affiliates. All rights reserved.
+   Copyright (c) 2002, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -236,7 +236,7 @@ Stored_routine_creation_ctx *Stored_routine_creation_ctx::load_from_db(
 
   /* Create the context. */
 
-  return new (*THR_MALLOC)
+  return new (thd->mem_root)
       Stored_routine_creation_ctx(client_cs, connection_cl, db_cl);
 }
 
@@ -379,22 +379,27 @@ static enum_sp_return_code db_find_routine(THD *thd, enum_sp_type type,
   DBUG_RETURN(ret);
 }
 
+namespace {
+
 /**
   Silence DEPRECATED SYNTAX warnings when loading a stored procedure
   into the cache.
 */
-class Silence_deprecated_warning : public Internal_error_handler {
+class Silence_deprecated_warning final : public Internal_error_handler {
  public:
-  virtual bool handle_condition(THD *, uint sql_errno, const char *,
-                                Sql_condition::enum_severity_level *level,
-                                const char *) {
-    if (sql_errno == ER_WARN_DEPRECATED_SYNTAX &&
+  bool handle_condition(THD *, uint sql_errno, const char *,
+                        Sql_condition::enum_severity_level *level,
+                        const char *) override {
+    if ((sql_errno == ER_WARN_DEPRECATED_SYNTAX ||
+         sql_errno == ER_WARN_DEPRECATED_SYNTAX_NO_REPLACEMENT) &&
         (*level) == Sql_condition::SL_WARNING)
       return true;
 
     return false;
   }
 };
+
+}  // namespace
 
 /**
   The function parses input strings and returns SP structure.
@@ -874,6 +879,15 @@ enum_sp_return_code sp_drop_routine(THD *thd, enum_sp_type type,
   if (error) DBUG_RETURN(SP_INTERNAL_ERROR);
 
   if (routine == nullptr) DBUG_RETURN(SP_DOES_NOT_EXISTS);
+  /*
+    If definer has the SYSTEM_USER privilege then invoker can drop procedure
+    only if latter also has same privilege.
+  */
+  Auth_id definer(routine->definer_user().c_str(),
+                  routine->definer_host().c_str());
+  Security_context *sctx = thd->security_context();
+  if (sctx->can_operate_with(definer, consts::system_user, true))
+    DBUG_RETURN(SP_INTERNAL_ERROR);
 
   // Drop routine.
   if (thd->dd_client()->drop(routine)) goto err_with_rollback;
@@ -1003,6 +1017,15 @@ bool sp_update_routine(THD *thd, enum_sp_type type, sp_name *name,
              thd->lex->spname->m_qname.str);
     DBUG_RETURN(true);
   }
+  /*
+    If definer has the SYSTEM_USER privilege then invoker can alter procedure
+    only if latter also has same privilege.
+  */
+  Auth_id definer(routine->definer_user().c_str(),
+                  routine->definer_host().c_str());
+  Security_context *sctx = thd->security_context();
+  if (sctx->can_operate_with(definer, consts::system_user, true))
+    DBUG_RETURN(true);
 
   if (mysql_bin_log.is_open() && type == enum_sp_type::FUNCTION &&
       !trust_function_creators &&
@@ -1211,11 +1234,11 @@ static bool show_create_routine_from_dd_routine(THD *thd, enum_sp_type type,
     Correct solution to this issue will be provided with the WL#8131 and
     WL#9049.
   */
-  bool full_access = (thd->security_context()->check_access(SELECT_ACL) ||
-                      (!strcmp(routine->definer_user().c_str(),
-                               thd->security_context()->priv_user().str) &&
-                       !strcmp(routine->definer_host().c_str(),
-                               thd->security_context()->priv_host().str)));
+  Security_context *sctx = thd->security_context();
+  bool full_access =
+      (sctx->check_access(SELECT_ACL, sp->m_db.str) ||
+       (!strcmp(routine->definer_user().c_str(), sctx->priv_user().str) &&
+        !strcmp(routine->definer_host().c_str(), sctx->priv_host().str)));
 
   if (!full_access &&
       check_some_routine_access(thd, sp->m_db.str, sp->m_name.str,
@@ -1534,7 +1557,7 @@ bool sp_exist_routines(THD *thd, TABLE_LIST *routines, bool is_proc) {
     lex_name.length = strlen(routine->table_name);
     lex_db.str = thd->strmake(routine->db, lex_db.length);
     lex_name.str = thd->strmake(routine->table_name, lex_name.length);
-    name = new (*THR_MALLOC) sp_name(lex_db, lex_name, true);
+    name = new (thd->mem_root) sp_name(lex_db, lex_name, true);
     name->init_qname(thd);
     sp_object_found = is_proc
                           ? sp_find_routine(thd, enum_sp_type::PROCEDURE, name,
@@ -2115,7 +2138,7 @@ sp_head *sp_start_parsing(THD *thd, enum_sp_type sp_type, sp_name *sp_name) {
   init_sql_alloc(key_memory_sp_head_main_root, &own_root, MEM_ROOT_BLOCK_SIZE,
                  MEM_ROOT_PREALLOC);
 
-  void *rawmem = alloc_root(&own_root, sizeof(sp_head));
+  void *rawmem = own_root.Alloc(sizeof(sp_head));
   if (!rawmem) return NULL;
 
   sp_head *sp = new (rawmem) sp_head(std::move(own_root), sp_type);

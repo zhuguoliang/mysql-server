@@ -1,5 +1,5 @@
 # -*- cperl -*-
-# Copyright (c) 2007, 2018, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2007, 2019, Oracle and/or its affiliates. All rights reserved.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
@@ -271,6 +271,8 @@ my @mysqld_rules = (
   { '#log-error'                                   => \&fix_log_error },
   { 'caching_sha2_password_private_key_path'       => \&fix_rsa_private_key },
   { 'caching_sha2_password_public_key_path'        => \&fix_rsa_public_key },
+  { 'loose-sha256_password_private_key_path'       => \&fix_rsa_private_key },
+  { 'loose-sha256_password_public_key_path'        => \&fix_rsa_public_key },
   { 'character-sets-dir'                           => \&fix_charset_dir },
   { 'datadir'                                      => \&fix_datadir },
   { 'port'                                         => \&fix_port },
@@ -632,6 +634,14 @@ sub new_config {
   # Additional rules required for [mysqltest]
   $self->run_rules_for_group($config, $config->insert('mysqltest'),
                              @mysqltest_rules);
+
+  if ($::secondary_engine_support) {
+    eval 'use mtr_secondary_engine_config; 1';
+    # Additional rules required for secondary engine server
+    push(@post_rules, \&post_check_secondary_engine_group);
+    # Additional rules required for [mysqld] when secondary engine is enabled
+    push(@post_rules, \&post_check_secondary_engine_mysqld_group);
+  }
 
   # Run post rules
   foreach my $rule (@post_rules) {

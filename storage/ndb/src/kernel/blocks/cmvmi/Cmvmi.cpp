@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2018, Oracle and/or its affiliates. All rights reserved.
+   Copyright (c) 2003, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -49,6 +49,10 @@
 #include <signaldata/AllocMem.hpp>
 #include <signaldata/NodeStateSignalData.hpp>
 #include <signaldata/GetConfig.hpp>
+
+#ifdef ERROR_INSERT
+#include <signaldata/FsOpenReq.hpp>
+#endif
 
 #include <EventLogger.hpp>
 #include <TimeQueue.hpp>
@@ -135,6 +139,11 @@ Cmvmi::Cmvmi(Block_context& ctx) :
   addRecSignal(GSN_ALLOC_MEM_CONF, &Cmvmi::execALLOC_MEM_CONF);
 
   addRecSignal(GSN_GET_CONFIG_REQ, &Cmvmi::execGET_CONFIG_REQ);
+
+#ifdef ERROR_INSERT
+  addRecSignal(GSN_FSOPENCONF, &Cmvmi::execFSOPENCONF);
+  addRecSignal(GSN_FSCLOSECONF, &Cmvmi::execFSCLOSECONF);
+#endif
 
   subscriberPool.setSize(5);
   c_syncReqPool.setSize(5);
@@ -456,8 +465,14 @@ void
 SavedEventBuffer::purge()
 {
   const Uint32 * ptr = m_data + m_read_pos;
-  const SavedEvent * header = (SavedEvent*)ptr;
-  Uint32 len = SavedEvent::HeaderLength + header->m_len;
+  /* First word of SavedEvent is m_len.
+   * One can not safely cast ptr to SavedEvent pointer since it may wrap if at
+   * end of buffer.
+   */
+  constexpr Uint32 len_off = 0;
+  static_assert(offsetof(SavedEvent, m_len) == len_off * sizeof(Uint32), "");
+  const Uint32 data_len = ptr[len_off];
+  Uint32 len = SavedEvent::HeaderLength + data_len;
   m_read_pos = (m_read_pos + len) % m_buffer_len;
 }
 
@@ -509,17 +524,23 @@ SavedEventBuffer::scan(SavedEvent* _dst, Uint32 filter[])
   assert(m_scan_pos != m_write_pos);
   Uint32 * dst = (Uint32*)_dst;
   const Uint32 * ptr = m_data + m_scan_pos;
-  SavedEvent * s = (SavedEvent*)ptr;
-  assert(s->m_len <= 25);
-  Uint32 total = s->m_len + SavedEvent::HeaderLength;
+  /* First word of SavedEvent is m_len.
+   * One can not safely cast ptr to SavedEvent pointer since it may wrap if at
+   * end of buffer.
+   */
+  constexpr Uint32 len_off = 0;
+  static_assert(offsetof(SavedEvent, m_len) == len_off * sizeof(Uint32), "");
+  const Uint32 data_len = ptr[len_off];
+  assert(data_len <= 25);
+  Uint32 total = data_len + SavedEvent::HeaderLength;
   if (m_scan_pos + total <= m_buffer_len)
   {
-    memcpy(dst, s, 4 * total);
+    memcpy(dst, ptr, 4 * total);
   }
   else
   {
     Uint32 remain = m_buffer_len - m_scan_pos;
-    memcpy(dst, s, 4 * remain);
+    memcpy(dst, ptr, 4 * remain);
     memcpy(dst + remain, m_data, 4 * (total - remain));
   }
   m_scan_pos = (m_scan_pos + total) % m_buffer_len;
@@ -536,8 +557,19 @@ SavedEventBuffer::getScanPosSeq() const
 {
   assert(m_scan_pos != m_write_pos);
   const Uint32 * ptr = m_data + m_scan_pos;
-  SavedEvent * s = (SavedEvent*)ptr;
-  return s->m_seq;
+  /* First word of SavedEvent is m_len.
+   * Second word of SavedEvent is m_seq.
+   * One can not safely cast ptr to SavedEvent pointer since it may wrap if at
+   * end of buffer.
+   */
+  static_assert(offsetof(SavedEvent, m_seq) % sizeof(Uint32) == 0, "");
+  constexpr Uint32 seq_off = offsetof(SavedEvent, m_seq) / sizeof(Uint32);
+  if (m_scan_pos + seq_off < m_buffer_len)
+  {
+    return ptr[seq_off];
+  }
+  const Uint32 wrap_seq_off = m_scan_pos + seq_off - m_buffer_len;
+  return m_data[wrap_seq_off];
 }
 
 void Cmvmi::execEVENT_REP(Signal* signal) 
@@ -849,7 +881,7 @@ void Cmvmi::execSTTOR(Signal* signal)
                                 &db_watchdog_interval);
       ndbrequire(db_watchdog_interval);
       update_watch_dog_timer(db_watchdog_interval);
-      Uint32 kill_val;
+      Uint32 kill_val = 0;
       ndb_mgm_get_int_parameter(p, CFG_DB_WATCHDOG_IMMEDIATE_KILL, 
                                 &kill_val);
       globalEmulatorData.theWatchDog->setKillSwitch((bool)kill_val);
@@ -2041,7 +2073,102 @@ Cmvmi::execDUMP_STATE_ORD(Signal* signal)
     sendSignal(NDBFS_REF, GSN_ALLOC_MEM_REQ, signal,
                AllocMemReq::SignalLength, JBB);
   }
+
+#ifdef ERROR_INSERT
+  if (signal->theData[0] == 667)
+  {
+    jam();
+    Uint32 numFiles = 100;
+    if (signal->getLength() == 2)
+    {
+      jam();
+      numFiles = signal->theData[1];
+    }
+
+    /* Send a number of concurrent file open requests
+     * for 'bound' files to NdbFS to test that it
+     * copes
+     * None are closed before all are open
+     */
+    g_remaining_responses = numFiles;
+
+    g_eventLogger->info("CMVMI : Bulk open %u files",
+                        numFiles);
+    FsOpenReq* openReq = (FsOpenReq*) &signal->theData[0];
+    openReq->userReference = reference();
+    openReq->userPointer = 0;
+    openReq->fileNumber[0] = ~Uint32(0);
+    openReq->fileNumber[1] = ~Uint32(0);
+    openReq->fileNumber[2] = 0;
+    openReq->fileNumber[3] =
+      1 << 24 |
+      1 << 16 |
+      255 << 8 |
+      255;
+    openReq->fileFlags = FsOpenReq::OM_READWRITE | FsOpenReq::OM_CREATE;
+
+    for (Uint32 i=0; i < numFiles; i++)
+    {
+      jam();
+      openReq->fileNumber[2] = i;
+      sendSignal(NDBFS_REF, GSN_FSOPENREQ, signal, FsOpenReq::SignalLength, JBB);
+    }
+    g_eventLogger->info("CMVMI : %u requests sent",
+                        numFiles);
+  }
+
+  if (signal->theData[0] == 668)
+  {
+    jam();
+
+    g_eventLogger->info("CMVMI : missing responses %u",
+                        g_remaining_responses);
+    /* Check that all files were opened */
+    ndbrequire(g_remaining_responses == 0);
+  }
+#endif // ERROR_INSERT
+
 }//Cmvmi::execDUMP_STATE_ORD()
+
+#ifdef ERROR_INSERT
+void
+Cmvmi::execFSOPENCONF(Signal* signal)
+{
+  jam();
+  if (signal->header.theSendersBlockRef != reference())
+  {
+    jam();
+    g_remaining_responses--;
+    g_eventLogger->info("Waiting for %u responses",
+                        g_remaining_responses);
+  }
+
+  if (g_remaining_responses > 0)
+  {
+    // We don't close any files until all are open
+    jam();
+    g_eventLogger->info("CMVMI delaying CONF");
+    sendSignalWithDelay(reference(), GSN_FSOPENCONF, signal, 300, signal->getLength());
+  }
+  else
+  {
+    signal->theData[0] = signal->theData[1];
+    signal->theData[1] = reference();
+    signal->theData[2] = 0;
+    signal->theData[3] = 1; // Remove the file on close"
+    signal->theData[4] = 0;
+    sendSignal(NDBFS_REF, GSN_FSCLOSEREQ, signal, 5, JBB);
+  }
+
+}
+
+void
+Cmvmi::execFSCLOSECONF(Signal* signal)
+{
+  jam();
+}
+
+#endif // ERROR_INSERT
 
 void
 Cmvmi::execALLOC_MEM_REF(Signal* signal)
@@ -2161,14 +2288,16 @@ void Cmvmi::execDBINFO_SCANREQ(Signal *signal)
         dm_pages_total,
         sizeof(GlobalPage),
         0,
-        { CFG_DB_DATA_MEM,0,0,0 }},
+        { CFG_DB_DATA_MEM,0,0,0 },
+        0},
       { "Long message buffer",
         g_sectionSegmentPool.getUsed(),
         g_sectionSegmentPool.getSize(),
         sizeof(SectionSegment),
         g_sectionSegmentPool.getUsedHi(),
-        { CFG_DB_LONG_SIGNAL_BUFFER,0,0,0 }},
-      { NULL, 0,0,0,0,{ 0,0,0,0 }}
+        { CFG_DB_LONG_SIGNAL_BUFFER,0,0,0 },
+        0},
+      { NULL, 0,0,0,0,{ 0,0,0,0 }, 0}
     };
 
     static const size_t num_config_params =
@@ -2190,6 +2319,8 @@ void Cmvmi::execDBINFO_SCANREQ(Signal *signal)
       row.write_uint64(pools[pool].entry_size);
       for (size_t i = 0; i < num_config_params; i++)
         row.write_uint32(pools[pool].config_params[i]);
+      row.write_uint32(GET_RG(pools[pool].record_type));
+      row.write_uint32(GET_TID(pools[pool].record_type));
       ndbinfo_send_row(signal, req, row, rl);
       pool++;
       if (rl.need_break(req))

@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2013, 2018, Oracle and/or its affiliates. All rights reserved.
+   Copyright (c) 2013, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -286,9 +286,8 @@ Trigger *Trigger::create_from_parser(THD *thd, TABLE *subject_table,
 
   timeval created_timestamp_not_set = {0, 0};
   Trigger *t = new (&subject_table->mem_root) Trigger(
-      trigger_name, &subject_table->mem_root,
-      to_lex_cstring(subject_table->s->db),
-      to_lex_cstring(subject_table->s->table_name), definition, definition_utf8,
+      trigger_name, &subject_table->mem_root, subject_table->s->db,
+      subject_table->s->table_name, definition, definition_utf8,
       thd->variables.sql_mode, definer_user, definer_host, client_cs_name,
       connection_cl_name, db_cl_name, lex->sphead->m_trg_chistics.event,
       lex->sphead->m_trg_chistics.action_time,
@@ -430,7 +429,7 @@ bool Trigger::execute(THD *thd) {
 }
 
 bool Trigger::create_full_trigger_definition(
-    THD *thd, String *full_trg_definition) const {
+    const THD *thd, String *full_trg_definition) const {
   bool ret = full_trg_definition->append(STRING_WITH_LEN("CREATE "));
   append_definer(thd, full_trg_definition, get_definer_user(),
                  get_definer_host());

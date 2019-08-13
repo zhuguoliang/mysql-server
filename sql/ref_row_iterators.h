@@ -1,7 +1,7 @@
 #ifndef SQL_REF_ROW_ITERATORS_H
 #define SQL_REF_ROW_ITERATORS_H
 
-/* Copyright (c) 2018, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2018, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -50,6 +50,7 @@ class RefIterator final : public TableRowIterator {
 
   bool Init() override;
   int Read() override;
+  std::vector<std::string> DebugString() const override;
 
  private:
   TABLE_REF *const m_ref;
@@ -71,6 +72,7 @@ class RefOrNullIterator final : public TableRowIterator {
 
   bool Init() override;
   int Read() override;
+  std::vector<std::string> DebugString() const override;
 
  private:
   TABLE_REF *const m_ref;
@@ -95,6 +97,7 @@ class EQRefIterator final : public TableRowIterator {
   bool Init() override;
   int Read() override;
   void UnlockRow() override;
+  std::vector<std::string> DebugString() const override;
 
  private:
   TABLE_REF *const m_ref;
@@ -116,6 +119,15 @@ class ConstIterator final : public TableRowIterator {
   bool Init() override;
   int Read() override;
 
+  /**
+    Rows from const tables are read once but potentially used
+    multiple times during execution of a query.
+    Ensure such rows are never unlocked during query execution.
+  */
+  void UnlockRow() override {}
+
+  std::vector<std::string> DebugString() const override;
+
  private:
   TABLE_REF *const m_ref;
   bool m_first_record_since_init;
@@ -132,6 +144,7 @@ class FullTextSearchIterator final : public TableRowIterator {
 
   bool Init() override;
   int Read() override;
+  std::vector<std::string> DebugString() const override;
 
  private:
   TABLE_REF *const m_ref;
@@ -160,6 +173,7 @@ class DynamicRangeIterator final : public TableRowIterator {
 
   bool Init() override;
   int Read() override;
+  std::vector<std::string> DebugString() const override;
 
  private:
   QEP_TAB *m_qep_tab;
@@ -211,6 +225,7 @@ class PushedJoinRefIterator final : public TableRowIterator {
 
   bool Init() override;
   int Read() override;
+  std::vector<std::string> DebugString() const override;
 
  private:
   TABLE_REF *const m_ref;
@@ -233,7 +248,7 @@ class AlternativeIterator final : public RowIterator {
   // Takes ownership of "source", and is responsible for
   // calling Init() on it, but does not hold the memory.
   AlternativeIterator(THD *thd, TABLE *table, QEP_TAB *qep_tab,
-                      Item *pushed_condition, ha_rows *examined_rows,
+                      ha_rows *examined_rows,
                       unique_ptr_destroy_only<RowIterator> source,
                       TABLE_REF *ref);
 
@@ -241,7 +256,21 @@ class AlternativeIterator final : public RowIterator {
 
   int Read() override { return m_iterator->Read(); }
 
+  void SetNullRowFlag(bool is_null_row) override {
+    // Init() may not have been called yet, so just forward to both iterators.
+    m_source_iterator->SetNullRowFlag(is_null_row);
+    m_table_scan_iterator.SetNullRowFlag(is_null_row);
+  }
+
   void UnlockRow() override { m_iterator->UnlockRow(); }
+
+  std::vector<Child> children() const override {
+    return std::vector<Child>{
+        {m_source_iterator.get(), ""},
+        {const_cast<TableScanIterator *>(&m_table_scan_iterator), ""}};
+  }
+
+  std::vector<std::string> DebugString() const override;
 
  private:
   // The reference value with condition guards that we are switching on.

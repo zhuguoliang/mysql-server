@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2016, 2018, Oracle and/or its affiliates. All rights reserved.
+  Copyright (c) 2016, 2019, Oracle and/or its affiliates. All rights reserved.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -43,18 +43,6 @@
 #ifndef _WIN32
 #include <sys/types.h>
 #include <unistd.h>
-#endif
-
-#ifdef _MSC_VER
-#ifdef logger_EXPORTS
-/* We are building this library */
-#define LOGGER_API __declspec(dllexport)
-#else
-/* We are using this library */
-#define LOGGER_API __declspec(dllimport)
-#endif
-#else
-#define LOGGER_API
 #endif
 
 #ifdef _WIN32
@@ -209,8 +197,8 @@ static inline void log_debug(const char *fmt, ...)
  */
 
 static inline void log_error(const char *fmt, ...) {
-  extern void log_message(LogLevel level, const char *module, const char *fmt,
-                          va_list ap);
+  extern void HARNESS_EXPORT log_message(LogLevel level, const char *module,
+                                         const char *fmt, va_list ap);
   va_list ap;
   va_start(ap, fmt);
   log_message(LogLevel::kError, MYSQL_ROUTER_LOG_DOMAIN, fmt, ap);
@@ -218,8 +206,8 @@ static inline void log_error(const char *fmt, ...) {
 }
 
 static inline void log_warning(const char *fmt, ...) {
-  extern void log_message(LogLevel level, const char *module, const char *fmt,
-                          va_list ap);
+  extern void HARNESS_EXPORT log_message(LogLevel level, const char *module,
+                                         const char *fmt, va_list ap);
   va_list ap;
   va_start(ap, fmt);
   log_message(LogLevel::kWarning, MYSQL_ROUTER_LOG_DOMAIN, fmt, ap);
@@ -227,8 +215,8 @@ static inline void log_warning(const char *fmt, ...) {
 }
 
 static inline void log_info(const char *fmt, ...) {
-  extern void log_message(LogLevel level, const char *module, const char *fmt,
-                          va_list ap);
+  extern void HARNESS_EXPORT log_message(LogLevel level, const char *module,
+                                         const char *fmt, va_list ap);
   va_list ap;
   va_start(ap, fmt);
   log_message(LogLevel::kInfo, MYSQL_ROUTER_LOG_DOMAIN, fmt, ap);
@@ -236,19 +224,25 @@ static inline void log_info(const char *fmt, ...) {
 }
 
 static inline void log_debug(const char *fmt, ...) {
-  extern void log_message(LogLevel level, const char *module, const char *fmt,
-                          va_list ap);
+  extern void HARNESS_EXPORT log_message(LogLevel level, const char *module,
+                                         const char *fmt, va_list ap);
   va_list ap;
   va_start(ap, fmt);
   log_message(LogLevel::kDebug, MYSQL_ROUTER_LOG_DOMAIN, fmt, ap);
   va_end(ap);
 }
 
-  /** @} */
+/** @} */
 
 #ifdef __cplusplus
 }
 #endif
+
+HARNESS_EXPORT bool log_level_is_handled(LogLevel level, const char *domain);
+
+static inline bool log_level_is_handled(LogLevel level) {
+  return log_level_is_handled(level, MYSQL_ROUTER_LOG_DOMAIN);
+}
 
 }  // namespace logging
 

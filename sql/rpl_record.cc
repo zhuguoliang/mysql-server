@@ -1,4 +1,4 @@
-/* Copyright (c) 2007, 2018, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2007, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -25,7 +25,6 @@
 #include <stddef.h>
 #include <algorithm>
 
-#include "binary_log_types.h"
 #include "lex_string.h"
 #include "m_ctype.h"
 #include "my_bitmap.h"  // MY_BITMAP
@@ -180,7 +179,7 @@ static bool unpack_field(const uchar **pack_ptr, Field *field, uint metadata,
     function is not called when applying updated records in
     replication.
   */
-  if ((field->flags & BLOB_FLAG) != 0 && field->is_virtual_gcol())
+  if (field->handle_old_value())
     (down_cast<Field_blob *>(field))->keep_old_value();
 
   if (is_partial_column) {
@@ -286,7 +285,7 @@ size_t pack_row(TABLE *table, MY_BITMAP const *columns_in_image,
   // Number of columns in table (counting even those that will not be written)
   uint table_column_count = table->pack_row_tmp_set.n_bits;
 
-  my_ptrdiff_t const rec_offset = record - table->record[0];
+  ptrdiff_t const rec_offset = record - table->record[0];
 
   // This is a moving cursor that points to the byte where the next
   // field will be written.
@@ -345,7 +344,7 @@ size_t pack_row(TABLE *table, MY_BITMAP const *columns_in_image,
   Bit_writer null_bits(pack_ptr);
   pack_ptr += (image_column_count + 7) / 8;
 
-  for (Field **p_field = table->field; *p_field != NULL; p_field++) {
+  for (Field **p_field = table->field; *p_field != nullptr; p_field++) {
     Field *field = *p_field;
     bool is_partial_json = false;
     if (bitmap_is_set(&table->pack_row_tmp_set, p_field - table->field)) {
@@ -590,8 +589,8 @@ bool unpack_row(Relay_log_info const *rli, TABLE *table,
                 row_image_type == enum_row_image_type::UPDATE_AI);
 
   // Get table_def object and table used for type conversion
-  table_def *tabledef = NULL;
-  TABLE *conv_table = NULL;
+  table_def *tabledef = nullptr;
+  TABLE *conv_table = nullptr;
   rli->get_table_data(table, &tabledef, &conv_table);
   DBUG_ASSERT(tabledef != nullptr);
 
@@ -640,17 +639,17 @@ bool unpack_row(Relay_log_info const *rli, TABLE *table,
         */
         table->clear_partial_update_diffs();
       else {
-      /*
-        partial_update_info has not been initialized (so this is the
-        first row in the statement having the PARTIAL_JSON bit set).
-        Initialize partial_update_info to allow the optimizer to
-        collect partial diffs when applying any diff.  Each diff
-        vector will be cleared between rows
-        (clear_partial_update_diffs above).  The whole
-        partial_update_info structure will be cleaned up at the end
-        of the statement, when close_thread_tables calls
-        cleanup_partial_update.
-      */
+        /*
+          partial_update_info has not been initialized (so this is the
+          first row in the statement having the PARTIAL_JSON bit set).
+          Initialize partial_update_info to allow the optimizer to
+          collect partial diffs when applying any diff.  Each diff
+          vector will be cleared between rows
+          (clear_partial_update_diffs above).  The whole
+          partial_update_info structure will be cleaned up at the end
+          of the statement, when close_thread_tables calls
+          cleanup_partial_update.
+        */
 #ifndef DBUG_OFF
         int marked_columns = 0;
 #endif
@@ -697,12 +696,12 @@ bool unpack_row(Relay_log_info const *rli, TABLE *table,
       the conversion table.  If the conversion table or the field
       pointer is NULL, no conversions are necessary.
      */
-    Field *conv_field = conv_table ? conv_table->field[col_i] : NULL;
+    Field *conv_field = conv_table ? conv_table->field[col_i] : nullptr;
     Field *const f = conv_field ? conv_field : field_ptr;
     DBUG_PRINT("debug",
                ("Conversion %srequired for field '%s' (#%d)",
                 conv_field ? "" : "not ", field_ptr->field_name, col_i));
-    DBUG_ASSERT(f != NULL);
+    DBUG_ASSERT(f != nullptr);
 
     DBUG_PRINT("debug",
                ("field name: %s; field position: %p", f->field_name, pack_ptr));
@@ -720,7 +719,7 @@ bool unpack_row(Relay_log_info const *rli, TABLE *table,
      */
     if (bitmap_is_set(column_image, col_i)) {
       /* Field...::unpack() cannot return 0 */
-      DBUG_ASSERT(pack_ptr != NULL);
+      DBUG_ASSERT(pack_ptr != nullptr);
 
       if (null_bits.get()) {
         if (f->maybe_null()) {
@@ -756,12 +755,12 @@ bool unpack_row(Relay_log_info const *rli, TABLE *table,
           Use the master's size information if available else call
           normal unpack operation.
         */
-        uint16 const metadata = tabledef->field_metadata(col_i);
+        uint const metadata = tabledef->field_metadata(col_i);
 #ifndef DBUG_OFF
         uchar const *const old_pack_ptr = pack_ptr;
 #endif
         /// @todo calc_field_size may read out of bounds /Sven
-        uint32 len = tabledef->calc_field_size(col_i, (uchar *)pack_ptr);
+        uint32 len = tabledef->calc_field_size(col_i, pack_ptr);
         uint32 event_len = event_end - pack_ptr;
         DBUG_PRINT("info", ("calc_field_size ret=%d event_len=%d", (int)len,
                             (int)event_len));
@@ -786,7 +785,7 @@ bool unpack_row(Relay_log_info const *rli, TABLE *table,
           RBR mode.
          */
         DBUG_ASSERT(tabledef->type(col_i) == MYSQL_TYPE_DECIMAL ||
-                    tabledef->calc_field_size(col_i, (uchar *)old_pack_ptr) ==
+                    tabledef->calc_field_size(col_i, old_pack_ptr) ==
                         (uint32)(pack_ptr - old_pack_ptr));
       }
 
@@ -836,7 +835,7 @@ bool unpack_row(Relay_log_info const *rli, TABLE *table,
       partial_bits.get();
     if (bitmap_is_set(column_image, col_i)) {
       if (!null_bits.get()) {
-        uint32 len = tabledef->calc_field_size(col_i, (uchar *)pack_ptr);
+        uint32 len = tabledef->calc_field_size(col_i, pack_ptr);
         uint32 event_len = event_end - pack_ptr;
         DBUG_PRINT("info", ("Skipping field"));
         DBUG_DUMP("info", pack_ptr, len);

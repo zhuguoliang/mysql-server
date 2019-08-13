@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2015, 2018, Oracle and/or its affiliates. All rights reserved.
+  Copyright (c) 2015, 2019, Oracle and/or its affiliates. All rights reserved.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -32,6 +32,9 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#ifndef _WIN32
+#include <fcntl.h>
+#endif
 
 #ifdef _WIN32
 #include <aclapi.h>
@@ -66,7 +69,7 @@ class HARNESS_EXPORT Path {
    */
 
   enum class FileType {
-    /** An error occured when trying to get file type, but it is *not*
+    /** An error occurred when trying to get file type, but it is *not*
      * that the file was not found. */
     STATUS_ERROR,
 
@@ -126,6 +129,7 @@ class HARNESS_EXPORT Path {
                         const std::string &extension);
 
   bool operator==(const Path &rhs) const;
+  bool operator!=(const Path &rhs) const { return !(*this == rhs); }
 
   /**
    * Path ordering operator.
@@ -389,6 +393,7 @@ class HARNESS_EXPORT Directory : public Path {
   Directory(const Path &path);  // NOLINT(runtime/explicit)
 
   Directory(const Directory &) = default;
+  Directory &operator=(const Directory &) = default;
   ~Directory();
 
   /**
@@ -500,6 +505,27 @@ HARNESS_EXPORT SecurityDescriptorPtr
 get_security_descriptor(const std::string &file_name);
 
 #endif
+
+#ifndef _WIN32
+using perm_mode = mode_t;
+extern const perm_mode kStrictDirectoryPerm;
+#else
+using perm_mode = int;
+extern const perm_mode kStrictDirectoryPerm;
+#endif
+
+/** @brief Creates a directory
+ * *
+ * @param dir       name (or path) of the directory to create
+ * @param mode      permission mode for the created directory
+ * @param recursive if true then immitated unix `mkdir -p` recursively
+ *                  creating parent directories if needed
+ * @retval 0 operation succeeded
+ * @retval -1 operation failed because of wrong parameters
+ * @retval > 0 errno for failure to mkdir() system call
+ */
+HARNESS_EXPORT
+int mkdir(const std::string &dir, perm_mode mode, bool recursive = false);
 
 }  // namespace mysql_harness
 

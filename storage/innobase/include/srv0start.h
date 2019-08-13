@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2018, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 1995, 2019, Oracle and/or its affiliates. All Rights Reserved.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
@@ -125,6 +125,10 @@ void srv_shutdown_all_bg_threads();
 purge threads early to apply purge. */
 void srv_start_purge_threads();
 
+/** If early redo/undo log encryption processing is done.
+@return true if it's done. */
+bool is_early_redo_undo_encryption_done();
+
 /** Copy the file path component of the physical file to parameter. It will
  copy up to and including the terminating path separator.
  @return number of bytes copied or ULINT_UNDEFINED if destination buffer
@@ -161,23 +165,38 @@ extern ibool srv_start_raw_disk_in_use;
 
 /** Shutdown state */
 enum srv_shutdown_t {
-  SRV_SHUTDOWN_NONE = 0,    /*!< Database running normally */
-  SRV_SHUTDOWN_CLEANUP,     /*!< Cleaning up in
-                            logs_empty_and_mark_files_at_shutdown() */
-  SRV_SHUTDOWN_FLUSH_PHASE, /*!< At this phase the master and the
-                           purge threads must have completed their
-                           work. Once we enter this phase the
-                           page_cleaner can clean up the buffer
-                           pool and exit */
-  SRV_SHUTDOWN_LAST_PHASE,  /*!< Last phase after ensuring that
-                            the buffer pool can be freed: flush
-                            all file spaces and close all files */
-  SRV_SHUTDOWN_EXIT_THREADS /*!< Exit all threads */
+  /** Database running normally. */
+  SRV_SHUTDOWN_NONE = 0,
+
+  /** Stopping all extra background tasks. This includes the purge threads and
+  every other thread in Srv_threads except:
+    - master thread,
+    - redo log threads,
+    - page cleaner threads,
+    - archiver threads.
+  At this phase the purge threads must be stopped. */
+  SRV_SHUTDOWN_CLEANUP,
+
+  /** Stopping the master thread. */
+  SRV_SHUTDOWN_MASTER_STOP,
+
+  /** Once we enter this phase the page_cleaners can clean up the buffer pool
+  and exit. Redo log threads write and flush the log buffer and exit after
+  page cleaners (and within this phase). Then we switch to the LAST_PHASE. */
+  SRV_SHUTDOWN_FLUSH_PHASE,
+
+  /** Last phase after ensuring that all data have been flushed to disk and
+  the flushed_lsn has been updated in the header of system tablespace.
+  During this phase we close all files and ensure archiver has archived all. */
+  SRV_SHUTDOWN_LAST_PHASE,
+
+  /** Exit all threads and free resources. */
+  SRV_SHUTDOWN_EXIT_THREADS
 };
 
 /** At a shutdown this value climbs from SRV_SHUTDOWN_NONE to
 SRV_SHUTDOWN_CLEANUP and then to SRV_SHUTDOWN_LAST_PHASE, and so on */
-extern enum srv_shutdown_t srv_shutdown_state;
+extern std::atomic<enum srv_shutdown_t> srv_shutdown_state;
 
 /** Call exit(3) */
 void srv_fatal_error() MY_ATTRIBUTE((noreturn));

@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 2013, 2018, Oracle and/or its affiliates. All rights reserved.
+Copyright (c) 2013, 2019, Oracle and/or its affiliates. All rights reserved.
 
 Portions of this file contain modifications contributed and copyrighted by
 Google, Inc. Those modifications are gratefully acknowledged and are described
@@ -130,14 +130,14 @@ struct Log_handle {
 
 /** Redo log - single data structure with state of the redo log system.
 In future, one could consider splitting this to multiple data structures. */
-struct log_t {
-/**************************************************/ /**
+struct alignas(INNOBASE_CACHE_LINE_SIZE) log_t {
+  /**************************************************/ /**
 
- @name Users writing to log buffer
+   @name Users writing to log buffer
 
- *******************************************************/
+   *******************************************************/
 
-/** @{ */
+  /** @{ */
 
 #ifndef UNIV_HOTBACKUP
   /** Sharded rw-lock which can be used to freeze redo log lsn.
@@ -494,24 +494,6 @@ struct log_t {
       /** Used for stopping the log background threads. */
       std::atomic_bool should_stop_threads;
 
-  /** True iff the log closer thread is alive. */
-  std::atomic_bool closer_thread_alive;
-
-  /** True iff the log checkpointer thread is alive. */
-  std::atomic_bool checkpointer_thread_alive;
-
-  /** True iff the log writer thread is alive. */
-  std::atomic_bool writer_thread_alive;
-
-  /** True iff the log flusher thread is alive. */
-  std::atomic_bool flusher_thread_alive;
-
-  /** True iff the log write notifier thread is alive. */
-  std::atomic_bool write_notifier_thread_alive;
-
-  /** True iff the log flush notifier thread is alive. */
-  std::atomic_bool flush_notifier_thread_alive;
-
   /** Size of the log buffer expressed in number of data bytes,
   that is excluding bytes for headers and footers of log blocks. */
   /*
@@ -537,6 +519,7 @@ struct log_t {
 
   /** Lsn from which recovery has been started. */
   lsn_t recovered_lsn;
+
 #endif /* !UNIV_HOTBACKUP */
 
   /** Number of log files. */
@@ -562,11 +545,19 @@ struct log_t {
   /** Wall time when we printed the statistics last time. */
   mutable time_t last_printout_time;
 
-  //#ifdef UNIV_DEBUG
+#ifdef UNIV_DEBUG
+
   /** When this is set, writing to the redo log should be disabled.
   We check for this in functions that write to the redo log. */
   bool disable_redo_writes;
-  //#endif /* UNIV_DEBUG */
+
+  /** DEBUG only - if we copied or initialized the first block in buffer,
+  this is set to lsn for which we did that. We later ensure that we start
+  the redo log at the same lsn. Else it is zero and we would crash when
+  trying to start redo then. */
+  lsn_t first_block_is_correct_for_lsn;
+
+#endif /* UNIV_DEBUG */
 
   /** Padding before memory used for checkpoints logic. */
   alignas(INNOBASE_CACHE_LINE_SIZE)
@@ -618,14 +609,14 @@ struct log_t {
   @see @ref subsect_redo_log_available_for_checkpoint_lsn */
   lsn_t available_for_checkpoint_lsn;
 
-  /** A new checkpoint lsn suggested by dict_persist.
+  /** Maximum lsn allowed for checkpoint by dict_persist or zero.
   This will be set by dict_persist_to_dd_table_buffer(), which should
   be always called before really making a checkpoint.
   If non-zero, up to this lsn value, dynamic metadata changes have been
   written back to mysql.innodb_dynamic_metadata under dict_persist->mutex
   protection. All dynamic metadata changes after this lsn have to
   be kept in redo logs, but not discarded. If zero, just ignore it. */
-  lsn_t dict_suggest_checkpoint_lsn;
+  lsn_t dict_max_allowed_checkpoint_lsn;
 
   /** When this is larger than the latest checkpoint, the log checkpointer
   thread will be forced to write a new checkpoint (unless the new latest

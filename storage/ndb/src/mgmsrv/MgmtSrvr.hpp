@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2018, Oracle and/or its affiliates. All rights reserved.
+   Copyright (c) 2003, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -154,17 +154,18 @@ public:
    * Copy the string if you are not going to use it immediately.
    */
   int status(int nodeId,
-	     ndb_mgm_node_status * status,
-	     Uint32 * version,
-	     Uint32 * mysql_version,
-	     Uint32 * phase,
-	     bool * systemShutdown,
-	     Uint32 * dynamicId,
-	     Uint32 * nodeGroup,
-	     Uint32 * connectCount,
-	     const char **address,
+             ndb_mgm_node_status * status,
+             Uint32 * version,
+             Uint32 * mysql_version,
+             Uint32 * phase,
+             bool * systemShutdown,
+             Uint32 * dynamicId,
+             Uint32 * nodeGroup,
+             Uint32 * connectCount,
+             const char **address,
              char *addr_buf,
-             size_t addr_buf_size);
+             size_t addr_buf_size,
+             bool* is_single_user);
 
   /**
    *   Stop a list of nodes
@@ -372,20 +373,23 @@ private:
                   Uint32& version, Uint32& mysql_version,
                   const char **address,
                   char *addr_buf,
-                  size_t addr_buf_size);
+                  size_t addr_buf_size,
+                  bool& is_single_user);
   void status_mgmd(NodeId node_id,
                    ndb_mgm_node_status& node_status,
                    Uint32& version, Uint32& mysql_version,
                    const char **address,
                    char *addr_buf,
-                   size_t addr_buf_size);
+                   size_t addr_buf_size,
+                   bool& is_single_user);
 
   int sendVersionReq(int processId,
                      Uint32 &version,
                      Uint32& mysql_version,
                      const char **address,
                      char *addr_buf,
-                     size_t addr_buf_size);
+                     size_t addr_buf_size,
+                     bool& is_single_user);
 
   int sendStopMgmd(NodeId nodeId,
                    bool abort,
@@ -420,6 +424,7 @@ private:
 
   bool is_any_node_starting(void);
   bool is_any_node_stopping(void);
+  bool is_any_node_alive(void);
   bool is_any_node_in_started_state(void);
   bool is_cluster_single_user(void);
   bool are_all_nodes_in_cmvmi_state(void);

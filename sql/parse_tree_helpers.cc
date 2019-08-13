@@ -1,4 +1,4 @@
-/* Copyright (c) 2013, 2018, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2013, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -75,7 +75,7 @@ Item_splocal *create_item_for_sp_var(THD *thd, LEX_STRING name,
   sp_pcontext *pctx = lex->get_sp_current_parsing_ctx();
 
   /* If necessary, look for the variable. */
-  if (pctx && !spv) spv = pctx->find_variable(name, false);
+  if (pctx && !spv) spv = pctx->find_variable(name.str, name.length, false);
 
   if (!spv) {
     my_error(ER_SP_UNDECLARED_VAR, MYF(0), name.str);
@@ -133,7 +133,6 @@ bool find_sys_var_null_base(THD *thd, struct sys_var_with_base *tmp) {
 
 bool set_system_variable(THD *thd, struct sys_var_with_base *var_with_base,
                          enum enum_var_type var_type, Item *val) {
-  set_var *var;
   LEX *lex = thd->lex;
   sp_head *sp = lex->sphead;
   sp_pcontext *pctx = lex->get_sp_current_parsing_ctx();
@@ -160,9 +159,9 @@ bool set_system_variable(THD *thd, struct sys_var_with_base *var_with_base,
     return true;
   }
 
-  if (!(var = new (*THR_MALLOC) set_var(var_type, var_with_base->var,
-                                        &var_with_base->base_name, val)))
-    return true;
+  set_var *var = new (thd->mem_root)
+      set_var(var_type, var_with_base->var, &var_with_base->base_name, val);
+  if (var == nullptr) return true;
 
   return lex->var_list.push_back(var);
 }
@@ -331,9 +330,8 @@ bool sp_create_assignment_instr(THD *thd, const char *expr_end_ptr) {
 
     const char *expr_start_ptr = sp->m_parser_data.get_option_start_ptr();
 
-    LEX_STRING expr;
-    expr.str = (char *)expr_start_ptr;
-    expr.length = expr_end_ptr - expr_start_ptr;
+    LEX_CSTRING expr{expr_start_ptr,
+                     static_cast<size_t>(expr_end_ptr - expr_start_ptr)};
 
     /* Construct SET-statement query. */
 
@@ -383,7 +381,7 @@ bool sp_create_assignment_instr(THD *thd, const char *expr_end_ptr) {
   @note **) If @c strict if false and engine is unknown, the function outputs
             a warning, sets @c ret to NULL and returns false (success).
 */
-bool resolve_engine(THD *thd, const LEX_STRING &name, bool is_temp_table,
+bool resolve_engine(THD *thd, const LEX_CSTRING &name, bool is_temp_table,
                     bool strict, handlerton **ret) {
   plugin_ref plugin = ha_resolve_by_name(thd, &name, is_temp_table);
   if (plugin) {
@@ -457,7 +455,7 @@ bool apply_privileges(
           if (point)
             point->rights |= grant;
           else {
-            LEX_COLUMN *col = new (*THR_MALLOC) LEX_COLUMN(*new_str, grant);
+            LEX_COLUMN *col = new (thd->mem_root) LEX_COLUMN(*new_str, grant);
             if (col == NULL) return true;
             lex->columns.push_back(col);
           }

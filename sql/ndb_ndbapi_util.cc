@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2011, 2018, Oracle and/or its affiliates. All rights reserved.
+   Copyright (c) 2011, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -27,6 +27,7 @@
 #include <string.h>           // memcpy
 
 #include "my_byteorder.h"
+#include "sql/ndb_name_util.h" // ndb_name_is_temp
 
 
 void ndb_pack_varchar(const NdbDictionary::Table *ndbtab, unsigned column_index,
@@ -149,6 +150,7 @@ ndb_table_has_tablespace(const NdbDictionary::Table* ndbtab)
 
 }
 
+
 const char*
 ndb_table_tablespace_name(const NdbDictionary::Table* ndbtab)
 {
@@ -164,8 +166,189 @@ ndb_table_tablespace_name(const NdbDictionary::Table* ndbtab)
 }
 
 
+std::string
+ndb_table_tablespace_name(NdbDictionary::Dictionary *dict,
+                          const NdbDictionary::Table *ndbtab)
+{
+  // NOTE! The getTablespaceName() returns zero length string
+  // to indicate no tablespace
+  std::string tablespace_name = ndbtab->getTablespaceName();
+  if (tablespace_name.empty())
+  {
+    // Just the zero length name, no tablespace name
+    // Try and retrieve it using the id as a fallback mechanism
+    Uint32 tablespace_id;
+    if (ndbtab->getTablespace(&tablespace_id))
+    {
+      const NdbDictionary::Tablespace ts = dict->getTablespace(tablespace_id);
+      if (!ndb_dict_check_NDB_error(dict))
+      {
+        tablespace_name = ts.getName();
+      }
+    }
+  }
+  return tablespace_name;
+}
+
+
 bool
 ndb_dict_check_NDB_error(NdbDictionary::Dictionary* dict)
 {
   return (dict->getNdbError().code != 0);
+}
+
+
+bool ndb_get_logfile_group_names(NdbDictionary::Dictionary* dict,
+                                 std::unordered_set<std::string>& lfg_names)
+{
+  NdbDictionary::Dictionary::List lfg_list;
+  if (dict->listObjects(lfg_list, NdbDictionary::Object::LogfileGroup) != 0)
+  {
+    return false;
+  }
+
+  for (uint i = 0; i < lfg_list.count; i++)
+  {
+    NdbDictionary::Dictionary::List::Element &elmt = lfg_list.elements[i];
+    lfg_names.insert(elmt.name);
+  }
+  return true;
+}
+
+
+bool ndb_get_tablespace_names(NdbDictionary::Dictionary* dict,
+                              std::unordered_set<std::string>& tablespace_names)
+{
+  NdbDictionary::Dictionary::List tablespace_list;
+  if (dict->listObjects(tablespace_list, NdbDictionary::Object::Tablespace)
+      != 0)
+  {
+    return false;
+  }
+
+  for (uint i = 0; i < tablespace_list.count; i++)
+  {
+    NdbDictionary::Dictionary::List::Element &elmt =
+      tablespace_list.elements[i];
+    tablespace_names.insert(elmt.name);
+  }
+  return true;
+}
+
+
+bool ndb_get_table_names_in_schema(NdbDictionary::Dictionary* dict,
+                                   const std::string &schema_name,
+                                   std::unordered_set<std::string>& table_names)
+{
+  NdbDictionary::Dictionary::List list;
+  if (dict->listObjects(list, NdbDictionary::Object::UserTable) != 0)
+  {
+    return false;
+  }
+
+  for (uint i = 0; i < list.count; i++)
+  {
+    NdbDictionary::Dictionary::List::Element &elmt = list.elements[i];
+
+    if (schema_name != elmt.database)
+    {
+      continue;
+    }
+
+    if (ndb_name_is_temp(elmt.name) ||
+        ndb_name_is_blob_prefix(elmt.name) ||
+        ndb_name_is_index_stat(elmt.name))
+    {
+      continue;
+    }
+
+    if (elmt.state == NdbDictionary::Object::StateOnline ||
+        elmt.state == NdbDictionary::Object::ObsoleteStateBackup ||
+        elmt.state == NdbDictionary::Object::StateBuilding)
+    {
+      // Only return the table if they're already usable i.e. StateOnline or
+      // StateBackup or if they're expected to be usable soon which is denoted
+      // by StateBuilding
+      table_names.insert(elmt.name);
+    }
+  }
+  return true;
+}
+
+
+bool ndb_get_undofile_names(NdbDictionary::Dictionary *dict,
+                            const std::string &logfile_group_name,
+                            std::vector<std::string> &undofile_names)
+{
+  NdbDictionary::Dictionary::List undofile_list;
+  if (dict->listObjects(undofile_list, NdbDictionary::Object::Undofile) != 0)
+  {
+    return false;
+  }
+
+  for (uint i = 0; i < undofile_list.count; i++)
+  {
+    NdbDictionary::Dictionary::List::Element &elmt = undofile_list.elements[i];
+    NdbDictionary::Undofile uf = dict->getUndofile(-1, elmt.name);
+    if (logfile_group_name.compare(uf.getLogfileGroup()) == 0)
+    {
+      undofile_names.push_back(elmt.name);
+    }
+  }
+  return true;
+}
+
+
+bool ndb_get_datafile_names(NdbDictionary::Dictionary *dict,
+                            const std::string &tablespace_name,
+                            std::vector<std::string> &datafile_names)
+{
+  NdbDictionary::Dictionary::List datafile_list;
+  if (dict->listObjects(datafile_list, NdbDictionary::Object::Datafile) != 0)
+  {
+    return false;
+  }
+
+  for (uint i = 0; i < datafile_list.count; i++)
+  {
+    NdbDictionary::Dictionary::List::Element &elmt = datafile_list.elements[i];
+    NdbDictionary::Datafile df = dict->getDatafile(-1, elmt.name);
+    if (tablespace_name.compare(df.getTablespace()) == 0)
+    {
+      datafile_names.push_back(elmt.name);
+    }
+  }
+  return true;
+}
+
+
+bool
+ndb_get_database_names_in_dictionary(
+    NdbDictionary::Dictionary* dict,
+    std::unordered_set<std::string>& database_names) {
+  DBUG_ENTER("ndb_get_database_names_in_dictionary");
+
+  /* Get all the list of tables from NDB and read the database names */
+  NdbDictionary::Dictionary::List list;
+  if (dict->listObjects(list, NdbDictionary::Object::UserTable) != 0)
+    DBUG_RETURN(false);
+
+  for (uint i= 0 ; i < list.count ; i++) {
+    NdbDictionary::Dictionary::List::Element& elmt= list.elements[i];
+
+    /* Skip the table if it is not in an expected state
+       or if it is a temporary or blob table.*/
+    if ((elmt.state != NdbDictionary::Object::StateOnline &&
+         elmt.state != NdbDictionary::Object::StateBuilding) ||
+        ndb_name_is_temp(elmt.name) || ndb_name_is_blob_prefix(elmt.name)) {
+      DBUG_PRINT("debug",
+                 ("Skipping table %s.%s", elmt.database, elmt.name));
+      continue;
+    }
+    DBUG_PRINT("debug",
+               ("Found %s.%s in NDB", elmt.database, elmt.name));
+
+    database_names.insert(elmt.database);
+  }
+  DBUG_RETURN(true);
 }

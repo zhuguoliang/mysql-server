@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2018, Oracle and/or its affiliates. All rights reserved.
+   Copyright (c) 2003, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -10364,7 +10364,7 @@ void Dbdih::startGcpMasterTakeOver(Signal* signal, Uint32 oldMasterId){
   m_gcp_save.m_master.m_new_gci = m_gcp_save.m_gci;
 
   setLocalNodefailHandling(signal, oldMasterId, NF_GCP_TAKE_OVER);
-}//Dbdih::handleNewMaster()
+}
 
 void Dbdih::startRemoveFailedNode(Signal* signal, NodeRecordPtr failedNodePtr)
 {
@@ -11478,6 +11478,7 @@ Dbdih::checkEmptyLcpComplete(Signal *signal)
     }
     
     c_lcpMasterTakeOverState.set(LMTOS_INITIAL, __LINE__);
+    m_master_lcp_req_lcp_already_completed = false;
     MasterLCPReq * const req = (MasterLCPReq *)&signal->theData[0];
     req->masterRef = reference();
     req->failedNodeId = c_lcpMasterTakeOverState.failedNodeId;
@@ -11955,6 +11956,7 @@ void Dbdih::execMASTER_LCPCONF(Signal* signal)
   switch(lcpState){
   case MasterLCPConf::LCP_STATUS_IDLE:
     ok = true;
+    m_master_lcp_req_lcp_already_completed = true;
     break;
   case MasterLCPConf::LCP_STATUS_ACTIVE:
   case MasterLCPConf::LCP_TAB_COMPLETED:
@@ -11995,8 +11997,10 @@ void Dbdih::execMASTER_LCPREF(Signal* signal)
   MASTER_LCPhandling(signal, failedNodeId);
 }//Dbdih::execMASTER_LCPREF()
 
-void Dbdih::MASTER_LCPhandling(Signal* signal, Uint32 failedNodeId) 
+void Dbdih::MASTER_LCPhandling(Signal* signal, Uint32 failedNodeId)
 {
+  bool lcp_already_completed = m_master_lcp_req_lcp_already_completed;
+  m_master_lcp_req_lcp_already_completed = false;
   /*-------------------------------------------------------------------------
    *
    * WE ARE NOW READY TO CONCLUDE THE TAKE OVER AS MASTER. 
@@ -12105,7 +12109,21 @@ void Dbdih::MASTER_LCPhandling(Signal* signal, Uint32 failedNodeId)
       // change state due to table write completion during state 
       // collection phase.
       /* ------------------------------------------------------------------- */
-      ndbrequire(c_lcpState.lcpStatus != LCP_STATUS_IDLE);
+
+      /**
+       * During master takeover, some participant nodes could have
+       * been in IDLE state since they have already completed the
+       * lcpId under the old master before it failed.
+
+       * When I, the new master, take over and send MASTER_LCP_REQ and
+       * execute MASTER_LCPCONF from participants, excempt the
+       * already-completed participants from the requirement to be
+       * "not in IDLE state". Those who sent MASTER_LCPREF had not
+       * completed the current LCP under the old master and thus
+       * cannot be in IDLE state.
+       */
+      ndbrequire(c_lcpState.lcpStatus != LCP_STATUS_IDLE ||
+                 lcp_already_completed);
 
       c_lcp_runs_with_pause_support = check_if_pause_lcp_possible();
       if (!c_lcp_runs_with_pause_support)
@@ -17411,6 +17429,8 @@ Dbdih::execSUB_GCP_COMPLETE_REP(Signal* signal)
   }
   
   Uint32 masterRef = rep.senderRef;
+  const Uint64 gci = (Uint64(rep.gci_hi) << 32) | rep.gci_lo;
+
   if (m_micro_gcp.m_state == MicroGcp::M_GCP_IDLE)
   {
     jam();
@@ -17426,11 +17446,26 @@ Dbdih::execSUB_GCP_COMPLETE_REP(Signal* signal)
   m_micro_gcp.m_state = MicroGcp::M_GCP_IDLE;
 
   /**
-   * To handle multiple LDM instances, this need to be passed though
-   * each LQH...(so that no fire-trig-ord can arrive "too" late)
-   */
-  sendSignal(DBLQH_REF, GSN_SUB_GCP_COMPLETE_REP, signal,
-             signal->length(), JBB);
+    Ensure that SUB_GCP_COMPLETE_REP is send once per epoch to Dblqh.
+  */
+  ndbrequire(gci == m_micro_gcp.m_old_gci);
+#if defined(ERROR_INSERT) || defined(VM_TRACE)
+  /**
+    Detect if some test actually provoke a double send.
+    At point of writing no test have failed yet.
+  */
+  ndbrequire(gci > m_micro_gcp.m_last_sent_gci);
+#endif
+  if (gci > m_micro_gcp.m_last_sent_gci)
+  {
+    /**
+     * To handle multiple LDM instances, this need to be passed though
+     * each LQH...(so that no fire-trig-ord can arrive "too" late)
+     */
+    sendSignal(DBLQH_REF, GSN_SUB_GCP_COMPLETE_REP, signal,
+               signal->length(), JBB);
+    m_micro_gcp.m_last_sent_gci = gci;
+  }
 reply:
   Uint32 nodeId = refToNode(masterRef);
   if (!ndbd_dih_sub_gcp_complete_ack(getNodeInfo(nodeId).m_version))
@@ -19171,7 +19206,7 @@ Dbdih::copyTabReq_complete(Signal* signal, TabRecordPtr tabPtr){
 void Dbdih::readPagesIntoTableLab(Signal* signal, Uint32 tableId) 
 {
   /**
-   * No need to protect these changes, they are only occuring during
+   * No need to protect these changes, they are only occurring during
    * recovery when DBTC hasn't accessibility to the table yet.
    */
   RWFragment rf;
@@ -21924,6 +21959,19 @@ void Dbdih::execLCP_COMPLETE_REP(Signal* signal)
     /* Handle case 7) above) */
     jam();
     ndbrequire(signal->length() == LcpCompleteRep::SignalLength);
+
+    /**
+     * During master takeover, some participant nodes could have been
+     * in IDLE state since they have already completed the lcpId under
+     * the old master before it failed. However, they may receive
+     * LCP_COMPLETE_REP again for the same lcpId from the new master.
+     */
+    if (c_lcpState.lcpStatus == LCP_STATUS_IDLE &&
+        c_lcpState.already_completed_lcp(lcpId, nodeId))
+    {
+      return;
+    }
+
     /**
      * Always allowed free pass through for signals from master that LCP is
      * completed.
@@ -22888,6 +22936,10 @@ dolocal:
   EXECUTE_DIRECT(NDBFS, GSN_DUMP_STATE_ORD, signal, 2);
 
   signal->theData[0] = 404;
+  signal->theData[1] = file1Ptr.p->fileRef;
+  EXECUTE_DIRECT(NDBFS, GSN_DUMP_STATE_ORD, signal, 2);
+
+  signal->theData[0] = DumpStateOrd::NdbfsDumpRequests;
   signal->theData[1] = file1Ptr.p->fileRef;
   EXECUTE_DIRECT(NDBFS, GSN_DUMP_STATE_ORD, signal, 2);
 
@@ -27420,9 +27472,16 @@ Dbdih::sendREDO_STATE_REP_to_all(Signal *signal,
     ptrCheckGuard(nodePtr, MAX_NDB_NODES, nodeRecord);
     if (nodePtr.p->copyCompleted || send_to_all)
     {
-      jamLine(nodePtr.i);
       BlockReference ref = numberToRef(block, nodePtr.i);
-      sendSignal(ref, GSN_REDO_STATE_REP, signal, 2, JBB);
+      if (ndbd_enable_redo_control(getNodeInfo(nodePtr.i).m_version))
+      {
+        jamLine(nodePtr.i);
+        sendSignal(ref, GSN_REDO_STATE_REP, signal, 2, JBB);
+      }
+      else
+      {
+        jamLine(nodePtr.i);
+      }
     }
     nodePtr.i = nodePtr.p->nextNode;
   } while (nodePtr.i != RNIL);

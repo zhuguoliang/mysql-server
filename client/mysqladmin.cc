@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2000, 2018, Oracle and/or its affiliates. All rights reserved.
+   Copyright (c) 2000, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -54,8 +54,9 @@
 #define SHUTDOWN_DEF_TIMEOUT 3600 /* Wait for shutdown */
 #define MAX_TRUNC_LENGTH 3
 
-char *host = NULL, *user = 0, *opt_password = 0,
-     *default_charset = (char *)MYSQL_AUTODETECT_CHARSET_NAME;
+const char *host = nullptr;
+char *user = 0, *opt_password = 0;
+const char *default_charset = MYSQL_AUTODETECT_CHARSET_NAME;
 char truncated_var_names[MAX_MYSQL_VAR][MAX_TRUNC_LENGTH];
 char ex_var_names[MAX_MYSQL_VAR][FN_REFLEN];
 ulonglong last_values[MAX_MYSQL_VAR];
@@ -300,8 +301,13 @@ bool get_one_option(int optid,
       opt_count_iterations = 1;
       break;
     case 'p':
-      if (argument == disabled_my_option)
-        argument = (char *)"";  // Don't require password
+      if (argument == disabled_my_option) {
+        // Don't require password
+        static char empty_password[] = {'\0'};
+        DBUG_ASSERT(empty_password[0] ==
+                    '\0');  // Check that it has not been overwritten
+        argument = empty_password;
+      }
       if (argument) {
         char *start = argument;
         my_free(opt_password);
@@ -402,7 +408,10 @@ int main(int argc, char *argv[]) {
     uint tmp = opt_connect_timeout;
     mysql_options(&mysql, MYSQL_OPT_CONNECT_TIMEOUT, (char *)&tmp);
   }
-  SSL_SET_OPTIONS(&mysql);
+  if (SSL_SET_OPTIONS(&mysql)) {
+    fprintf(stderr, "%s", SSL_SET_OPTIONS_ERROR);
+    return EXIT_FAILURE;
+  }
   if (opt_protocol)
     mysql_options(&mysql, MYSQL_OPT_PROTOCOL, (char *)&opt_protocol);
 #if defined(_WIN32)
@@ -564,7 +573,7 @@ static bool sql_connect(MYSQL *mysql, uint wait) {
     {
       if (!option_silent)  // print diagnostics
       {
-        if (!host) host = (char *)LOCAL_HOST;
+        if (!host) host = LOCAL_HOST;
         my_printf_error(0, "connect to server at '%s' failed\nerror: '%s'",
                         error_flags, host, mysql_error(mysql));
         if (mysql_errno(mysql) == CR_CONNECTION_ERROR) {
@@ -737,9 +746,9 @@ static int execute_commands(MYSQL *mysql, int argc, char **argv) {
           printf("TCP port\t\t%d\n", mysql->port);
         status = mysql_stat(mysql);
         {
-          char *pos, buff[40];
+          char buff[40];
           ulong sec;
-          pos = (char *)strchr(status, ' ');
+          char *pos = strchr(const_cast<char *>(status), ' ');
           *pos++ = 0;
           printf("%s\t\t\t", status); /* print label */
           if ((status = str2int(pos, 10, 0, LONG_MAX, (long *)&sec))) {
@@ -1005,7 +1014,7 @@ static int execute_commands(MYSQL *mysql, int argc, char **argv) {
           */
         }
 
-          /* Warn about password being set in non ssl connection */
+        /* Warn about password being set in non ssl connection */
 #if defined(HAVE_OPENSSL)
         {
           uint ssl_mode = 0;
@@ -1393,8 +1402,7 @@ static void truncate_names() {
 
 static bool get_pidfile(MYSQL *mysql, char *pidfile) {
   MYSQL_RES *result;
-
-  if (mysql_query(mysql, "SHOW VARIABLES LIKE 'pid_file'")) {
+  if (mysql_query(mysql, "SELECT @@datadir, @@pid_file")) {
     my_printf_error(mysql_errno(mysql),
                     "The query to get the server's pid file failed,"
                     " error: '%s'. Continuing.",
@@ -1403,7 +1411,13 @@ static bool get_pidfile(MYSQL *mysql, char *pidfile) {
   result = mysql_store_result(mysql);
   if (result) {
     MYSQL_ROW row = mysql_fetch_row(result);
-    if (row) my_stpcpy(pidfile, row[1]);
+    if (row) {
+      char datadir[FN_REFLEN];
+      char pidfile_option[FN_REFLEN];
+      my_stpcpy(datadir, row[0]);
+      my_stpcpy(pidfile_option, row[1]);
+      (void)my_load_path(pidfile, pidfile_option, datadir);
+    }
     mysql_free_result(result);
     return row == 0; /* Error if row = 0 */
   }

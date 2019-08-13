@@ -1,4 +1,4 @@
-/* Copyright (c) 2014, 2018, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2014, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -23,17 +23,21 @@
 #include <stddef.h>
 #include <algorithm>
 #include <list>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
 
 #include <mysql/components/services/log_builtins.h>
+#include "mutex_lock.h"
 #include "my_dbug.h"
+#include "plugin/group_replication/include/autorejoin.h"
 #include "plugin/group_replication/include/gcs_event_handlers.h"
 #include "plugin/group_replication/include/observer_trans.h"
 #include "plugin/group_replication/include/pipeline_stats.h"
 #include "plugin/group_replication/include/plugin.h"
 #include "plugin/group_replication/include/plugin_handlers/primary_election_invocation_handler.h"
+#include "plugin/group_replication/include/plugin_handlers/remote_clone_handler.h"
 #include "plugin/group_replication/include/plugin_messages/group_action_message.h"
 #include "plugin/group_replication/include/plugin_messages/group_validation_message.h"
 #include "plugin/group_replication/include/plugin_messages/sync_before_execution_message.h"
@@ -318,23 +322,13 @@ void Plugin_gcs_events_handler::handle_recovery_message(
     terminate_wait_on_start_process();
 
     /**
+      Re-check compatibility, members may leave during recovery.
       Disable the read mode in the server if the member is:
       - joining
       - doesn't have a higher possible incompatible version
       - We are not on Primary mode.
     */
-    if (*joiner_compatibility_status != READ_COMPATIBLE &&
-        (local_member_info->get_role() ==
-             Group_member_info::MEMBER_ROLE_PRIMARY ||
-         !local_member_info->in_primary_mode())) {
-      if (disable_server_read_mode(PSESSION_DEDICATED_THREAD)) {
-        LogPluginErr(WARNING_LEVEL,
-                     ER_GRP_RPL_DISABLE_SRV_READ_MODE_RESTRICTED); /* purecov:
-                                                                      inspected
-                                                                    */
-      }
-    }
-
+    disable_read_mode_for_compatible_members(true);
   } else {
     Group_member_info *member_info =
         group_member_mgr->get_group_member_info(member_uuid);
@@ -434,6 +428,7 @@ void Plugin_gcs_events_handler::handle_group_action_message(
   switch (action_message_type) {
     case Group_action_message::ACTION_MULTI_PRIMARY_MESSAGE:
     case Group_action_message::ACTION_PRIMARY_ELECTION_MESSAGE:
+    case Group_action_message::ACTION_SET_COMMUNICATION_PROTOCOL_MESSAGE:
       group_action_message = new Group_action_message(
           message.get_message_data().get_payload(),
           message.get_message_data().get_payload_length());
@@ -619,8 +614,10 @@ void Plugin_gcs_events_handler::on_view_changed(
   }
 
   // An early error on the applier can render the join invalid
-  if (is_joining && local_member_info->get_recovery_status() ==
-                        Group_member_info::MEMBER_ERROR) {
+  if (is_joining &&
+      local_member_info->get_recovery_status() ==
+          Group_member_info::MEMBER_ERROR &&
+      !autorejoin_module->is_autorejoin_ongoing()) {
     LogPluginErr(ERROR_LEVEL, ER_GRP_RPL_MEMBER_EXIT_PLUGIN_ERROR);
     gcs_module->notify_of_view_change_cancellation(
         GROUP_REPLICATION_CONFIGURATION_ERROR);
@@ -707,7 +704,7 @@ void Plugin_gcs_events_handler::on_view_changed(
       view_id_representation = view->get_view_id().get_representation();
       delete view;
     }
-
+    disable_read_mode_for_compatible_members();
     LogPluginErr(
         INFORMATION_LEVEL, ER_GRP_RPL_MEMBER_CHANGE,
         group_member_mgr->get_string_current_view_active_hosts().c_str(),
@@ -781,6 +778,12 @@ bool Plugin_gcs_events_handler::was_member_expelled_from_group(
     if (!error)
       applier_module->kill_pending_transactions(
           true, true, Gcs_operations::ALREADY_LEFT, nullptr);
+
+    // If we have the auto-rejoin process enabled, now is the time to run it!
+    if (is_autorejoin_enabled()) {
+      autorejoin_module->start_autorejoin(get_number_of_autorejoin_tries(),
+                                          get_rejoin_timeout());
+    }
   }
 
   DBUG_RETURN(result);
@@ -898,7 +901,7 @@ void Plugin_gcs_events_handler::handle_joining_members(const Gcs_view &new_view,
                                              Group_member_info::MEMBER_ERROR,
                                              m_notification_ctx);
       this->leave_group_on_error();
-      plugin_is_setting_read_mode = false;
+      set_plugin_is_setting_read_mode(false);
 
       /*
         unblock threads waiting for the member to become ONLINE
@@ -907,7 +910,7 @@ void Plugin_gcs_events_handler::handle_joining_members(const Gcs_view &new_view,
 
       return;
     } else {
-      plugin_is_setting_read_mode = false;
+      set_plugin_is_setting_read_mode(false);
     }
 
     /**
@@ -939,23 +942,85 @@ void Plugin_gcs_events_handler::handle_joining_members(const Gcs_view &new_view,
     applier_module->add_view_change_packet(view_change_packet);
 
     /*
-     Launch the recovery thread so we can receive missing data and the
-     certification information needed to apply the transactions queued after
-     this view change.
-
-     Recovery receives a view id, as a means to identify logically on joiners
-     and donors alike where this view change happened in the data. With that
-     info we can then ask for the donor to give the member all the data until
-     this point in the data, and the certification information for all the data
-     that comes next.
-
-     When alone, the server will go through Recovery to wait for the consumption
-     of his applier relay log that may contain transactions from previous
-     executions.
+     Chose what is the strategy for recovery.
+     Note that even if clone is chosen, if an error occurs on its launch,
+     distributed recovery is again selected as the default choice.
     */
-    recovery_module->start_recovery(
-        new_view.get_group_id().get_group_id(),
-        new_view.get_view_id().get_representation());
+    Remote_clone_handler::enum_clone_check_result recovery_strategy =
+        Remote_clone_handler::DO_RECOVERY;
+
+    // The check is not needed if the member is alone
+    if (number_of_members > 1)
+      recovery_strategy = remote_clone_handler->check_clone_preconditions();
+
+    if (Remote_clone_handler::DO_CLONE == recovery_strategy) {
+      LogPluginErr(INFORMATION_LEVEL, ER_GRP_RPL_RECOVERY_STRAT_CHOICE,
+                   "Cloning from a remote group donor.");
+      /*
+       Launch the clone process. It will configure SSL options and the list
+       of allowed donors.
+       When terminated, the clone process will restart the server.
+       The whole start join process is still done as an error on cloning can
+       mean we fall back to distributed recovery.
+      */
+      if (remote_clone_handler->clone_server(
+              new_view.get_group_id().get_group_id(),
+              new_view.get_view_id().get_representation())) {
+        /* purecov: begin inspected */
+        LogPluginErr(WARNING_LEVEL, ER_GRP_RPL_RECOVERY_STRAT_FALLBACK,
+                     "Distributed Recovery.");
+        recovery_strategy = Remote_clone_handler::DO_RECOVERY;
+        /* purecov: end */
+      }
+    }
+
+    if (Remote_clone_handler::DO_RECOVERY == recovery_strategy) {
+      LogPluginErr(INFORMATION_LEVEL, ER_GRP_RPL_RECOVERY_STRAT_CHOICE,
+                   "Distributed recovery from a group donor");
+      /*
+       Launch the recovery thread so we can receive missing data and the
+       certification information needed to apply the transactions queued after
+       this view change.
+
+       Recovery receives a view id, as a means to identify logically on joiners
+       and donors alike where this view change happened in the data. With that
+       info we can then ask for the donor to give the member all the data until
+       this point in the data, and the certification information for all the
+       data that comes next.
+
+       When alone, the server will go through Recovery to wait for the
+       consumption of his applier relay log that may contain transactions from
+       previous executions.
+      */
+      recovery_module->start_recovery(
+          new_view.get_group_id().get_group_id(),
+          new_view.get_view_id().get_representation());
+    } else if (Remote_clone_handler::CHECK_ERROR == recovery_strategy ||
+               Remote_clone_handler::NO_RECOVERY_POSSIBLE ==
+                   recovery_strategy) {
+      if (Remote_clone_handler::NO_RECOVERY_POSSIBLE == recovery_strategy)
+        LogPluginErr(ERROR_LEVEL, ER_GRP_RPL_NO_POSSIBLE_RECOVERY);
+      else {
+        /* purecov: begin inspected */
+        LogPluginErr(ERROR_LEVEL, ER_GRP_RPL_RECOVERY_EVAL_ERROR, "");
+        /* purecov: end */
+      }
+
+      /*
+        The notification will be triggered in the top level handle function
+        that calls this one. In this case, the on_view_changed handle.
+      */
+      group_member_mgr->update_member_status(local_member_info->get_uuid(),
+                                             Group_member_info::MEMBER_ERROR,
+                                             m_notification_ctx);
+      this->leave_group_on_error();
+
+      /*
+        unblock threads waiting for the member to become ONLINE
+      */
+      terminate_wait_on_start_process();
+      return;
+    }
   }
   /*
     The condition
@@ -1142,6 +1207,7 @@ int Plugin_gcs_events_handler::process_local_exchanged_data(
 
 Gcs_message_data *Plugin_gcs_events_handler::get_exchangeable_data() const {
   std::string server_executed_gtids;
+  std::string server_purged_gtids;
   std::string applier_retrieved_gtids;
   Replication_thread_api applier_channel("group_replication_applier");
 
@@ -1150,17 +1216,23 @@ Gcs_message_data *Plugin_gcs_events_handler::get_exchangeable_data() const {
 
   if (sql_command_interface->establish_session_connection(
           PSESSION_DEDICATED_THREAD, GROUPREPL_USER, get_plugin_pointer())) {
-    LogPluginErr(
-        WARNING_LEVEL,
-        ER_GRP_RPL_GRP_CHANGE_INFO_EXTRACT_ERROR); /* purecov: inspected */
-    goto sending;                                  /* purecov: inspected */
+    /* purecov: begin inspected */
+    LogPluginErr(WARNING_LEVEL, ER_GRP_RPL_GRP_CHANGE_INFO_EXTRACT_ERROR);
+    goto sending;
+    /* purecov: end */
   }
 
   if (sql_command_interface->get_server_gtid_executed(server_executed_gtids)) {
-    LogPluginErr(
-        WARNING_LEVEL,
-        ER_GRP_RPL_GTID_EXECUTED_EXTRACT_ERROR); /* purecov: inspected */
-    goto sending;                                /* purecov: inspected */
+    /* purecov: begin inspected */
+    LogPluginErr(WARNING_LEVEL, ER_GRP_RPL_GTID_EXECUTED_EXTRACT_ERROR);
+    goto sending;
+    /* purecov: inspected */
+  }
+  if (sql_command_interface->get_server_gtid_purged(server_purged_gtids)) {
+    /* purecov: begin inspected */
+    LogPluginErr(WARNING_LEVEL, ER_GRP_RPL_GTID_PURGED_EXTRACT_ERROR);
+    goto sending;
+    /* purecov: end */
   }
   if (applier_channel.get_retrieved_gtid_set(applier_retrieved_gtids)) {
     LogPluginErr(WARNING_LEVEL,
@@ -1168,13 +1240,29 @@ Gcs_message_data *Plugin_gcs_events_handler::get_exchangeable_data() const {
   }
 
   group_member_mgr->update_gtid_sets(local_member_info->get_uuid(),
-                                     server_executed_gtids,
+                                     server_executed_gtids, server_purged_gtids,
                                      applier_retrieved_gtids);
 sending:
 
   delete sql_command_interface;
 
   std::vector<uchar> data;
+
+  /*
+    When a member is auto-rejoining, it starts in the ERROR state. Normally
+    the member would only change to the RECOVERY state when it was OFFLINE,
+    but we want the member to be in ERROR state when an auto-rejoin occurs,
+    so we force the change from ERROR to RECOVERY when the member is
+    undergoing an auto-rejoin procedure.
+    We do that change on the data exchange just before the view install, so
+    that when all members do receive the view on which this member joins
+    all do see the correct RECOVERY state.
+  */
+  if (autorejoin_module->is_autorejoin_ongoing()) {
+    group_member_mgr->update_member_status(
+        local_member_info->get_uuid(), Group_member_info::MEMBER_IN_RECOVERY,
+        m_notification_ctx);
+  }
 
   // alert joiners that an action or election is running
   local_member_info->set_is_group_action_running(
@@ -1268,6 +1356,9 @@ int Plugin_gcs_events_handler::check_group_compatibility(
     LogPluginErr(ERROR_LEVEL, ER_GRP_RPL_MEMBER_VER_INCOMPATIBLE);
     return GROUP_REPLICATION_CONFIGURATION_ERROR;
   }
+  if (*joiner_compatibility_status == READ_COMPATIBLE) {
+    LogPluginErr(WARNING_LEVEL, ER_GRP_RPL_MEMBER_VER_READ_COMPATIBLE);
+  }
 
   /*
     All group members must have the same gtid_assignment_block_size
@@ -1307,24 +1398,35 @@ int Plugin_gcs_events_handler::check_group_compatibility(
 Compatibility_type
 Plugin_gcs_events_handler::check_version_compatibility_with_group() const {
   bool override_lower_incompatibility = false;
-  Compatibility_type compatibility_type = INCOMPATIBLE;
+  Compatibility_type compatibility_type = COMPATIBLE;
   bool read_compatible = false;
 
   std::vector<Group_member_info *> *all_members =
       group_member_mgr->get_all_members();
   std::vector<Group_member_info *>::iterator all_members_it;
+
+  Member_version lowest_version(0xFFFFFF);
+  std::set<Member_version> unique_version_set;
+  /* Find lowest member version and unique versions of the group for
+   * comparison. */
   for (all_members_it = all_members->begin();
        all_members_it != all_members->end(); all_members_it++) {
-    Member_version member_version = (*all_members_it)->get_member_version();
-    compatibility_type =
-        compatibility_manager->check_local_incompatibility(member_version);
+    /* Skip self */
+    if ((*all_members_it)->get_uuid() != local_member_info->get_uuid()) {
+      if ((*all_members_it)->get_member_version() < lowest_version)
+        lowest_version = (*all_members_it)->get_member_version();
+      unique_version_set.insert((*all_members_it)->get_member_version());
+    }
+  }
+  for (auto it = unique_version_set.begin();
+       it != unique_version_set.end() && compatibility_type != INCOMPATIBLE;
+       ++it) {
+    Member_version ver(*it);
+    compatibility_type = compatibility_manager->check_local_incompatibility(
+        ver, (ver == lowest_version));
 
     if (compatibility_type == READ_COMPATIBLE) {
       read_compatible = true;
-    }
-
-    if (compatibility_type == INCOMPATIBLE) {
-      break;
     }
 
     if (compatibility_type == INCOMPATIBLE_LOWER_VERSION) {
@@ -1339,7 +1441,6 @@ Plugin_gcs_events_handler::check_version_compatibility_with_group() const {
         compatibility_type = COMPATIBLE;
       } else {
         compatibility_type = INCOMPATIBLE;
-        break;
       }
     }
   }
@@ -1519,6 +1620,16 @@ int Plugin_gcs_events_handler::compare_member_option_compatibility() const {
                    (*all_members_it)->get_lower_case_table_names());
       goto cleaning;
     }
+
+    if (local_member_info->get_default_table_encryption() !=
+        (*all_members_it)->get_default_table_encryption()) {
+      result = 1;
+      LogPluginErr(ERROR_LEVEL,
+                   ER_GRP_RPL_DEFAULT_TABLE_ENCRYPTION_DIFF_FROM_GRP,
+                   local_member_info->get_default_table_encryption(),
+                   (*all_members_it)->get_default_table_encryption());
+      goto cleaning;
+    }
   }
 
 cleaning:
@@ -1592,4 +1703,35 @@ void Plugin_gcs_events_handler::leave_group_on_error() const {
       return;
   }
   LogPluginErr(log_severity, errcode); /* purecov: inspected */
+}
+
+void Plugin_gcs_events_handler::disable_read_mode_for_compatible_members(
+    bool force_check) const {
+  Member_version lowest_version =
+      group_member_mgr->get_group_lowest_online_version();
+  /* We need to lock the operations of group_member_mgr so that member does not
+   * changes it state to ERROR and enables read only mode after we check its
+   * state here. If we read old ONLINE value and continue to disable read mode,
+   * member will continue to be writable even in ERROR state. So lock protects
+   * from this situation. */
+  MUTEX_LOCK(lock, group_member_mgr->get_update_lock());
+  if (local_member_info->get_recovery_status() ==
+          Group_member_info::MEMBER_ONLINE &&
+      (force_check || *joiner_compatibility_status != COMPATIBLE)) {
+    *joiner_compatibility_status =
+        Compatibility_module::check_version_incompatibility(
+            local_member_info->get_member_version(), lowest_version);
+    /* Some lower version left the group, now this member is new lowest
+     * version. */
+    if ((!local_member_info->in_primary_mode() &&
+         *joiner_compatibility_status == COMPATIBLE) ||
+        (local_member_info->in_primary_mode() &&
+         local_member_info->get_role() ==
+             Group_member_info::MEMBER_ROLE_PRIMARY)) {
+      if (disable_server_read_mode(PSESSION_DEDICATED_THREAD)) {
+        LogPluginErr(WARNING_LEVEL,
+                     ER_GRP_RPL_DISABLE_SRV_READ_MODE_RESTRICTED);
+      }
+    }
+  }
 }

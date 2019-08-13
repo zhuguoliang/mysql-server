@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2017, Oracle and/or its affiliates. All rights reserved.
+   Copyright (c) 2018, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -30,6 +30,7 @@
 #include "sql/ndb_dist_priv_util.h"
 #include "sql/ndb_log.h"
 #include "sql/ndb_ndbapi_util.h"
+#include "sql/ndb_schema_dist.h"
 #include "sql/ndb_share.h"
 #include "sql/rpl_filter.h"  // binlog_filter
 #include "sql/sql_class.h"
@@ -44,9 +45,9 @@ bool Ndb_binlog_client::table_should_have_event(
     NDB_SHARE* share, const NdbDictionary::Table* ndbtab) const {
   DBUG_ENTER("table_should_have_event");
 
-  // Never create event(or event operation) for distributed
-  // privilege tables, the local ACL is kept in synch using
-  // schema distribution and by storing those tables in NDB
+  // Never create event(or event operation) for legacy distributed
+  // privilege tables, which will be seen only when upgrading from
+  // an earlier version.
   if (Ndb_dist_priv_util::is_distributed_priv_table(m_dbname, m_tabname)) {
     DBUG_PRINT("info", ("dist priv table"));
     DBUG_RETURN(false);
@@ -89,20 +90,26 @@ bool Ndb_binlog_client::table_should_have_event_op(const NDB_SHARE* share) {
   }
 
   // Some tables should always have event operation
-  if (strcmp(share->db, NDB_REP_DB) == 0) {
-    // The table is in "mysql" database
 
-    // Check for mysql.ndb_schema
-    if (strcmp(share->table_name, NDB_SCHEMA_TABLE) == 0) {
-      DBUG_PRINT("exit", ("always need event op for " NDB_SCHEMA_TABLE));
-      DBUG_RETURN(true);
-    }
+  // Check for schema dist table
+  if (Ndb_schema_dist_client::is_schema_dist_table(share->db,
+                                                   share->table_name)) {
+    DBUG_PRINT("exit", ("always need event op for %s", share->table_name));
+    DBUG_RETURN(true);
+  }
 
-    // Check for mysql.ndb_apply_status
-    if (strcmp(share->table_name, NDB_APPLY_TABLE) == 0) {
-      DBUG_PRINT("exit", ("always need event op for " NDB_APPLY_TABLE));
-      DBUG_RETURN(true);
-    }
+  // Check for schema dist result table
+  if (Ndb_schema_dist_client::is_schema_dist_result_table(share->db,
+                                                          share->table_name)) {
+    DBUG_PRINT("exit", ("always need event op for %s", share->table_name));
+    DBUG_RETURN(true);
+  }
+
+  // Check for mysql.ndb_apply_status
+  if (strcmp(share->db, NDB_REP_DB) == 0 &&
+      strcmp(share->table_name, NDB_APPLY_TABLE) == 0) {
+    DBUG_PRINT("exit", ("always need event op for %s", share->table_name));
+    DBUG_RETURN(true);
   }
 
   if (!ndb_binlog_running) {
@@ -128,12 +135,10 @@ bool Ndb_binlog_client::table_should_have_event_op(const NDB_SHARE* share) {
 
 std::string Ndb_binlog_client::event_name_for_table(const char* db,
                                                     const char* table_name,
-                                                    bool full,
-                                                    bool allow_hardcoded_name) {
-  if (allow_hardcoded_name && strcmp(db, NDB_REP_DB) == 0 &&
-      strcmp(table_name, NDB_SCHEMA_TABLE) == 0) {
-    // Always use REPL$ as prefix for the event on mysql.ndb_schema
-    // (unless when dropping events and allow_hardcoded_name is set to false)
+                                                    bool full) {
+  if (Ndb_schema_dist_client::is_schema_dist_table(db, table_name) ||
+      Ndb_schema_dist_client::is_schema_dist_result_table(db, table_name)) {
+    // Always use REPL$ as prefix for the events on schema dist tables
     full = false;
   }
 

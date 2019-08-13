@@ -1,4 +1,4 @@
-/* Copyright (c) 2000, 2018, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2000, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -203,15 +203,15 @@ bool trans_begin(THD *thd, uint flags) {
     res = ha_start_consistent_snapshot(thd);
   }
 
-    /*
-      Register transaction start in performance schema if not done already.
-      We handle explicitly started transactions here, implicitly started
-      transactions (and single-statement transactions in autocommit=1 mode)
-      are handled in trans_register_ha().
-      We can't handle explicit transactions in the same way as implicit
-      because we want to correctly attribute statements which follow
-      BEGIN but do not touch any transactional tables.
-    */
+  /*
+    Register transaction start in performance schema if not done already.
+    We handle explicitly started transactions here, implicitly started
+    transactions (and single-statement transactions in autocommit=1 mode)
+    are handled in trans_register_ha().
+    We can't handle explicit transactions in the same way as implicit
+    because we want to correctly attribute statements which follow
+    BEGIN but do not touch any transactional tables.
+  */
 #ifdef HAVE_PSI_TRANSACTION_INTERFACE
   if (thd->m_transaction_psi == NULL) {
     thd->m_transaction_psi =
@@ -284,8 +284,17 @@ bool trans_commit(THD *thd, bool ignore_global_read_lock) {
     table statistics during CREATE TABLE ... SELECT, otherwise the
     uncommitted object added by DDL would be removed by I_S query.
   */
-  if (!thd->is_attachable_rw_transaction_active())
-    thd->dd_client()->commit_modified_objects();
+  if (!thd->is_attachable_rw_transaction_active()) {
+    /*
+      If the SE failed to commit the transaction, we must rollback the
+      modified dictionary objects to make sure the DD cache, the DD
+      tables and the state in the SE stay in sync.
+    */
+    if (res)
+      thd->dd_client()->rollback_modified_objects();
+    else
+      thd->dd_client()->commit_modified_objects();
+  }
 
   thd->locked_tables_list.adjust_renamed_tablespace_mdls(&thd->mdl_context);
 
@@ -360,8 +369,17 @@ bool trans_commit_implicit(THD *thd, bool ignore_global_read_lock) {
     table statistics during CREATE TABLE ... SELECT, otherwise the
     uncommitted object added by DDL would be removed by I_S query.
   */
-  if (!thd->is_attachable_rw_transaction_active())
-    thd->dd_client()->commit_modified_objects();
+  if (!thd->is_attachable_rw_transaction_active()) {
+    /*
+      If the SE failed to commit the transaction, we must rollback the
+      modified dictionary objects to make sure the DD cache, the DD
+      tables and the state in the SE stay in sync.
+    */
+    if (res)
+      thd->dd_client()->rollback_modified_objects();
+    else
+      thd->dd_client()->commit_modified_objects();
+  }
 
   thd->locked_tables_list.adjust_renamed_tablespace_mdls(&thd->mdl_context);
   DBUG_RETURN(res);
@@ -562,7 +580,7 @@ bool trans_rollback_stmt(THD *thd) {
   } else if (tc_log)
     tc_log->rollback(thd, false);
 
-  if (!thd->owned_gtid.is_empty() && !thd->in_active_multi_stmt_transaction()) {
+  if (!thd->owned_gtid_is_empty() && !thd->in_active_multi_stmt_transaction()) {
     /*
       To a failed single statement transaction on auto-commit mode,
       we roll back its owned gtid if it does not modify

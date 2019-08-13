@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2000, 2017, Oracle and/or its affiliates. All rights reserved.
+   Copyright (c) 2000, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -54,7 +54,7 @@ static bool tty_password = 0, opt_table_type = 0;
 static bool debug_info_flag = 0, debug_check_flag = 0;
 static uint my_end_arg = 0;
 static uint opt_verbose = 0;
-static char *default_charset = (char *)MYSQL_AUTODETECT_CHARSET_NAME;
+static const char *default_charset = MYSQL_AUTODETECT_CHARSET_NAME;
 static char *opt_plugin_dir = 0, *opt_default_auth = 0;
 static uint opt_enable_cleartext_plugin = 0;
 static bool using_opt_enable_cleartext_plugin = 0;
@@ -133,7 +133,10 @@ int main(int argc, char **argv) {
   }
   mysql_init(&mysql);
   if (opt_compress) mysql_options(&mysql, MYSQL_OPT_COMPRESS, NullS);
-  SSL_SET_OPTIONS(&mysql);
+  if (SSL_SET_OPTIONS(&mysql)) {
+    fprintf(stderr, "%s", SSL_SET_OPTIONS_ERROR);
+    exit(1);
+  }
   if (opt_protocol)
     mysql_options(&mysql, MYSQL_OPT_PROTOCOL, (char *)&opt_protocol);
   if (opt_bind_addr) mysql_options(&mysql, MYSQL_OPT_BIND, opt_bind_addr);
@@ -305,8 +308,13 @@ static bool get_one_option(int optid, const struct my_option *opt,
       opt_verbose++;
       break;
     case 'p':
-      if (argument == disabled_my_option)
-        argument = (char *)""; /* Don't require password */
+      if (argument == disabled_my_option) {
+        // Don't require password
+        static char empty_password[] = {'\0'};
+        DBUG_ASSERT(empty_password[0] ==
+                    '\0');  // Check that it has not been overwritten
+        argument = empty_password;
+      }
       if (argument) {
         char *start = argument;
         my_free(opt_password);

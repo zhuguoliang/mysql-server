@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2018, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 1995, 2019, Oracle and/or its affiliates. All Rights Reserved.
 Copyright (c) 2009, Google Inc.
 
 This program is free software; you can redistribute it and/or modify
@@ -50,6 +50,7 @@ the file COPYING.Google.
 #include <debug_sync.h>
 #endif /* !UNIV_HOTBACKUP */
 
+#include "arch0arch.h"
 #include "buf0buf.h"
 #include "buf0flu.h"
 #include "dict0boot.h"
@@ -302,7 +303,7 @@ void log_files_header_flush(log_t &log, uint32_t nth_file, lsn_t start_lsn) {
 
 void log_files_header_read(log_t &log, uint32_t header) {
   ut_a(srv_is_being_started);
-  ut_a(!log.checkpointer_thread_alive.load());
+  ut_a(!log_checkpointer_is_active());
 
   const auto page_no =
       static_cast<page_no_t>(header / univ_page_size.physical());
@@ -342,7 +343,7 @@ void meb_log_print_file_hdr(byte *block) {
 
 void log_files_downgrade(log_t &log) {
   ut_ad(srv_is_being_shutdown);
-  ut_a(!log.checkpointer_thread_alive.load());
+  ut_a(!log_checkpointer_is_active());
 
   const uint32_t nth_file = 0;
 
@@ -380,7 +381,7 @@ static lsn_t log_determine_checkpoint_lsn(log_t &log) {
   // TODO(baotiao): dict_lsn 也表示的是到dict_lsn 位置, 所有的DDL 相关的操作
   // 都已经写入到磁盘了. 因此他们两个的计算是分开的么?
   const lsn_t oldest_lsn = log.available_for_checkpoint_lsn;
-  const lsn_t dict_lsn = log.dict_suggest_checkpoint_lsn;
+  const lsn_t dict_lsn = log.dict_max_allowed_checkpoint_lsn;
 
   ut_a(dict_lsn == 0 || dict_lsn >= log.last_checkpoint_lsn);
 
@@ -470,6 +471,8 @@ void log_files_write_checkpoint(log_t &log, lsn_t next_checkpoint_lsn) {
 
   log_update_limits(log);
 
+  log.dict_max_allowed_checkpoint_lsn = 0;
+
   log_writer_mutex_exit(log);
 }
 
@@ -479,6 +482,10 @@ static void log_checkpoint(log_t &log) {
   ut_ad(!srv_checkpoint_disabled);
 
   const lsn_t checkpoint_lsn = log_determine_checkpoint_lsn(log);
+
+  if (arch_page_sys != nullptr) {
+    arch_page_sys->flush_at_checkpoint(checkpoint_lsn);
+  }
 
   LOG_SYNC_POINT("log_before_checkpoint_data_flush");
 
@@ -573,8 +580,13 @@ void log_create_first_checkpoint(log_t &log, lsn_t lsn) {
   log_block_set_flush_bit(block, true);
   log_block_set_data_len(block, LOG_BLOCK_HDR_SIZE);
   log_block_set_checkpoint_no(block, 0);
-  log_block_set_first_rec_group(block, 0);
+  log_block_set_first_rec_group(block, lsn % OS_FILE_LOG_BLOCK_SIZE);
   log_block_store_checksum(block);
+
+  std::memcpy(log.buf + block_lsn % log.buf_size, block,
+              OS_FILE_LOG_BLOCK_SIZE);
+
+  ut_d(log.first_block_is_correct_for_lsn = lsn);
 
   block_page_no =
       static_cast<page_no_t>(block_offset / univ_page_size.physical());
@@ -623,10 +635,9 @@ static void log_request_checkpoint_low(log_t &log, lsn_t requested_lsn) {
 }
 
 static void log_wait_for_checkpoint(const log_t &log, lsn_t requested_lsn) {
-  log_background_threads_active_validate(log);
+  ut_d(log_background_threads_active_validate(log));
 
   auto stop_condition = [&log, requested_lsn](bool) {
-
     return (log.last_checkpoint_lsn.load() >= requested_lsn);
   };
 
@@ -703,7 +714,7 @@ static void log_preflush_pool_modified_pages(const log_t &log,
   if (new_oldest == LSN_MAX
       /* Forced flush request is processed by page_cleaner, if
       it's not active, then we must do flush ourselves. */
-      || !buf_page_cleaner_is_active
+      || !buf_flush_page_cleaner_is_active()
       /* Reason unknown. */
       || srv_is_being_started) {
     buf_flush_sync_all_buf_pools();
@@ -880,12 +891,12 @@ static bool log_consider_checkpoint(log_t &log) {
 
   // 这里是要写checkpoint 的地方
   log_checkpoint(log);
+
   return (true);
 }
 
 void log_checkpointer(log_t *log_ptr) {
   ut_a(log_ptr != nullptr);
-  ut_a(log_ptr->checkpointer_thread_alive.load());
 
   log_t &log = *log_ptr;
 
@@ -893,7 +904,6 @@ void log_checkpointer(log_t *log_ptr) {
 
   while (true) {
     auto do_some_work = [&log] {
-
       ut_ad(log_checkpointer_mutex_own(log));
 
       /* We will base our next decisions on maximum lsn
@@ -913,6 +923,12 @@ void log_checkpointer(log_t *log_ptr) {
 
       if (sync_flushed || checkpointed) {
         return (true);
+      }
+
+      if (log.should_stop_threads.load()) {
+        if (!log_closer_is_active()) {
+          return (true);
+        }
       }
 
       return (false);
@@ -936,12 +952,12 @@ void log_checkpointer(log_t *log_ptr) {
     }
 
     /* Check if we should close the thread. */
-    if (log.should_stop_threads.load() && !log.closer_thread_alive.load()) {
-      break;
+    if (log.should_stop_threads.load()) {
+      if (!log_closer_is_active()) {
+        break;
+      }
     }
   }
-
-  log.checkpointer_thread_alive.store(false);
 
   log_checkpointer_mutex_exit(log);
 }
@@ -1022,8 +1038,6 @@ void log_update_limits(log_t &log) {
     limit_for_start -= margins;
   }
   log.sn_limit_for_start.store(limit_for_start);
-
-  log.dict_suggest_checkpoint_lsn = 0;
 }
 
 bool log_calc_max_ages(log_t &log) {
@@ -1088,6 +1102,6 @@ void log_increase_concurrency_margin(log_t &log) {
   MONITOR_SET(MONITOR_LOG_CONCURRENCY_MARGIN, new_size);
 }
 
-  /* @} */
+/* @} */
 
 #endif /* !UNIV_HOTBACKUP */

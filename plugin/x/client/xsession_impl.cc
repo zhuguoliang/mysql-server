@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2019, Oracle and/or its affiliates. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>  // NOLINT(build/c++11)
 #include <map>
 #include <memory>
 #include <set>
@@ -34,7 +35,12 @@
 
 #include "errmsg.h"
 #include "my_compiler.h"
+#include "my_config.h"
+#include "my_macros.h"
+#include "mysql_version.h"
 #include "mysqld_error.h"
+
+#include "plugin/x/client/any_filler.h"
 #include "plugin/x/client/mysqlxclient/xerror.h"
 #include "plugin/x/client/xcapability_builder.h"
 #include "plugin/x/client/xconnection_impl.h"
@@ -66,7 +72,7 @@ const char *const ER_TEXT_INVALID_AUTHENTICATION_CONFIGURED =
 
 namespace details {
 
-enum class Capability_datatype { String, Int, Bool };
+enum class Capability_datatype { String, Int, Bool, Object };
 
 /** This class implemented the default behavior of the factory.
  *  Still it implements
@@ -91,93 +97,6 @@ class Protocol_factory_default : public Protocol_factory {
         new Query_result(protocol, query_instances, context)};
 
     return result;
-  }
-};
-
-class Any_filler : public Argument_value::Argument_visitor {
- public:
-  explicit Any_filler(::Mysqlx::Datatypes::Any *any) : m_any(any) {}
-
- private:
-  ::Mysqlx::Datatypes::Any *m_any;
-
-  void visit() override {
-    m_any->set_type(::Mysqlx::Datatypes::Any_Type_SCALAR);
-    m_any->mutable_scalar()->set_type(::Mysqlx::Datatypes::Scalar_Type_V_NULL);
-  }
-
-  void visit(const int64_t value) override {
-    m_any->set_type(::Mysqlx::Datatypes::Any_Type_SCALAR);
-    m_any->mutable_scalar()->set_type(::Mysqlx::Datatypes::Scalar_Type_V_SINT);
-    m_any->mutable_scalar()->set_v_signed_int(value);
-  }
-
-  void visit(const uint64_t value) override {
-    m_any->set_type(::Mysqlx::Datatypes::Any_Type_SCALAR);
-    m_any->mutable_scalar()->set_type(::Mysqlx::Datatypes::Scalar_Type_V_UINT);
-    m_any->mutable_scalar()->set_v_unsigned_int(value);
-  }
-
-  void visit(const double value) override {
-    m_any->set_type(::Mysqlx::Datatypes::Any_Type_SCALAR);
-    m_any->mutable_scalar()->set_type(
-        ::Mysqlx::Datatypes::Scalar_Type_V_DOUBLE);
-    m_any->mutable_scalar()->set_v_double(value);
-  }
-
-  void visit(const float value) override {
-    m_any->set_type(::Mysqlx::Datatypes::Any_Type_SCALAR);
-    m_any->mutable_scalar()->set_type(::Mysqlx::Datatypes::Scalar_Type_V_FLOAT);
-    m_any->mutable_scalar()->set_v_float(value);
-  }
-
-  void visit(const bool value) override {
-    m_any->set_type(::Mysqlx::Datatypes::Any_Type_SCALAR);
-    m_any->mutable_scalar()->set_type(::Mysqlx::Datatypes::Scalar_Type_V_BOOL);
-    m_any->mutable_scalar()->set_v_bool(value);
-  }
-
-  void visit(const Object &obj) override {
-    m_any->set_type(::Mysqlx::Datatypes::Any_Type_OBJECT);
-    auto any_object = m_any->mutable_obj();
-
-    for (const auto &key_value : obj) {
-      auto fld = any_object->add_fld();
-      Any_filler filler(fld->mutable_value());
-
-      fld->set_key(key_value.first);
-      key_value.second.accept(&filler);
-    }
-  }
-
-  void visit(const Arguments &values) override {
-    m_any->set_type(::Mysqlx::Datatypes::Any_Type_ARRAY);
-    auto any_array = m_any->mutable_array();
-
-    for (const auto &value : values) {
-      Any_filler filler(any_array->add_value());
-      value.accept(&filler);
-    }
-  }
-
-  void visit(const std::string &value,
-             const Argument_value::String_type st) override {
-    m_any->set_type(::Mysqlx::Datatypes::Any_Type_SCALAR);
-
-    switch (st) {
-      case Argument_value::String_type::TString:
-      case Argument_value::String_type::TDecimal:
-        m_any->mutable_scalar()->set_type(
-            ::Mysqlx::Datatypes::Scalar_Type_V_STRING);
-        m_any->mutable_scalar()->mutable_v_string()->set_value(value);
-        break;
-
-      case Argument_value::String_type::TOctets:
-        m_any->mutable_scalar()->set_type(
-            ::Mysqlx::Datatypes::Scalar_Type_V_OCTETS);
-        m_any->mutable_scalar()->mutable_v_octets()->set_value(value);
-        break;
-    }
   }
 };
 
@@ -225,12 +144,19 @@ bool get_array_of_strings_from_any(const Mysqlx::Datatypes::Any &any,
 
 std::pair<std::string, Capability_datatype> get_capability_type(
     const XSession::Mysqlx_capability capability) {
-  if (XSession::Capability_can_handle_expired_password == capability)
-    return {"client.pwd_expire_ok", Capability_datatype::Bool};
+  switch (capability) {
+    case XSession::Capability_can_handle_expired_password:
+      return {"client.pwd_expire_ok", Capability_datatype::Bool};
 
-  if (XSession::Capability_client_interactive == capability)
-    return {"client.interactive", Capability_datatype::Bool};
+    case XSession::Capability_client_interactive:
+      return {"client.interactive", Capability_datatype::Bool};
 
+    case XSession::Capability_session_connect_attrs:
+      return {"session_connect_attrs", Capability_datatype::Object};
+
+    default: {
+    }
+  }
   return {};
 }
 
@@ -294,6 +220,43 @@ const char *value_or_default_string(const char *value,
 
   return value;
 }
+
+class Notice_server_hello_ignore {
+ public:
+  Notice_server_hello_ignore(XProtocol *protocol) : m_protocol(protocol) {
+    m_handler_id = m_protocol->add_notice_handler(
+        *this, Handler_position::Begin,
+        Handler_priority_low);  // TODO(lkotula): end ?
+  }
+
+  ~Notice_server_hello_ignore() {
+    if (XCL_HANDLER_ID_NOT_VALID != m_handler_id) {
+      m_protocol->remove_notice_handler(m_handler_id);
+    }
+  }
+
+  Notice_server_hello_ignore(const Notice_server_hello_ignore &) = default;
+
+  Handler_result operator()(XProtocol *, const bool is_global,
+                            const Mysqlx::Notice::Frame::Type type,
+                            const char *, const uint32_t) {
+    const bool is_hello_notice =
+        Mysqlx::Notice::Frame_Type_SERVER_HELLO == type;
+
+    if (!is_global) return Handler_result::Continue;
+    if (!is_hello_notice) return Handler_result::Continue;
+
+    if (m_already_received) return Handler_result::Error;
+
+    m_already_received = true;
+
+    return Handler_result::Consumed;
+  }
+
+  bool m_already_received = false;
+  XProtocol::Handler_id m_handler_id = XCL_HANDLER_ID_NOT_VALID;
+  XProtocol *m_protocol;
+};
 
 }  // namespace details
 
@@ -378,6 +341,9 @@ XError Session_impl::set_mysql_option(const Mysqlx_option option,
     case Mysqlx_option::Ssl_crl_path:
       m_context->m_ssl_config.m_crl_path = value;
       break;
+    case Mysqlx_option::Network_namespace:
+      m_context->m_connection_config.m_network_namespace = value;
+      break;
 
     case Mysqlx_option::Authentication_method:
       return details::translate_texts_into_auth_types({value},
@@ -421,6 +387,10 @@ XError Session_impl::set_mysql_option(const Mysqlx_option option,
 
     case Mysqlx_option::Connect_timeout:
       m_context->m_connection_config.m_timeout_connect = value;
+      break;
+
+    case Mysqlx_option::Session_connect_timeout:
+      m_context->m_connection_config.m_timeout_session_connect = value;
       break;
 
     case Mysqlx_option::Datetime_length_discriminator:
@@ -486,20 +456,34 @@ XError Session_impl::set_capability(const Mysqlx_capability capability,
   return {};
 }
 
+XError Session_impl::set_capability(const Mysqlx_capability capability,
+                                    const Argument_object &value) {
+  auto capability_type = details::get_capability_type(capability);
+
+  if (details::Capability_datatype::Object != capability_type.second)
+    return XError{CR_X_UNSUPPORTED_CAPABILITY_VALUE,
+                  ER_TEXT_CAPABILITY_NOT_SUPPORTED};
+
+  m_capabilities[capability_type.first] = value;
+
+  return {};
+}
+
 XError Session_impl::connect(const char *host, const uint16_t port,
                              const char *user, const char *pass,
                              const char *schema) {
   if (is_connected())
     return XError{CR_ALREADY_CONNECTED, ER_TEXT_ALREADY_CONNECTED};
 
-  auto result = get_protocol().get_connection().connect(
-      details::value_or_empty_string(host), port ? port : MYSQLX_TCP_PORT,
-      m_internet_protocol);
-
+  Session_connect_timeout_scope_guard timeout_guard{this};
+  auto &connection = get_protocol().get_connection();
+  const auto result =
+      connection.connect(details::value_or_empty_string(host),
+                         port ? port : MYSQLX_TCP_PORT, m_internet_protocol);
   if (result) return result;
 
-  auto connection_type =
-      get_protocol().get_connection().state().get_connection_type();
+  const auto connection_type = connection.state().get_connection_type();
+  details::Notice_server_hello_ignore notice_ignore(m_protocol.get());
 
   return authenticate(user, pass, schema, connection_type);
 }
@@ -509,14 +493,16 @@ XError Session_impl::connect(const char *socket_file, const char *user,
   if (is_connected())
     return XError{CR_ALREADY_CONNECTED, ER_TEXT_ALREADY_CONNECTED};
 
-  auto result = get_protocol().get_connection().connect_to_localhost(
+  Session_connect_timeout_scope_guard timeout_guard{this};
+  auto &connection = get_protocol().get_connection();
+  const auto result = connection.connect_to_localhost(
       details::value_or_default_string(socket_file, MYSQLX_UNIX_ADDR));
 
   if (result) return result;
 
-  auto connection_type =
-      get_protocol().get_connection().state().get_connection_type();
+  const auto connection_type = connection.state().get_connection_type();
 
+  details::Notice_server_hello_ignore notice_ignore(m_protocol.get());
   return authenticate(user, pass, schema, connection_type);
 }
 
@@ -529,6 +515,7 @@ XError Session_impl::reauthenticate(const char *user, const char *pass,
 
   if (error) return error;
 
+  Session_connect_timeout_scope_guard timeout_guard{this};
   error = get_protocol().recv_ok();
 
   if (error) return error;
@@ -568,7 +555,7 @@ std::unique_ptr<XQuery_result> Session_impl::execute_stmt(
   stmt.set_namespace_(ns);
 
   for (const auto &argument : arguments) {
-    details::Any_filler filler(stmt.mutable_args()->Add());
+    Any_filler filler(stmt.mutable_args()->Add());
 
     argument.accept(&filler);
   }
@@ -978,6 +965,64 @@ std::string Session_impl::get_method_from_auth(const Auth auth) {
 bool Session_impl::needs_servers_capabilities() const {
   return m_use_auth_methods.size() == 1 &&
          m_use_auth_methods[0] == Auth::Auto_from_capabilities;
+}
+
+Argument_object Session_impl::get_connect_attrs() const {
+  return {
+      {"_client_name", Argument_value{HAVE_MYSQLX_FULL_PROTO(
+                           "libmysqlxclient", "libmysqlxclient_lite")}},
+      {"_client_version", Argument_value{PACKAGE_VERSION}},
+      {"_os", Argument_value{SYSTEM_TYPE}},
+      {"_platform", Argument_value{MACHINE_TYPE}},
+      {"_client_license", Argument_value{STRINGIFY_ARG(LICENSE)}},
+#ifdef _WIN32
+      {"_pid", Argument_value{std::to_string(
+                   static_cast<uint64_t>(GetCurrentProcessId()))}},
+      {"_thread", Argument_value{std::to_string(
+                      static_cast<uint64_t>(GetCurrentThreadId()))}},
+#else
+      {"_pid", Argument_value{std::to_string(static_cast<uint64_t>(getpid()))}},
+#endif
+  };
+}
+
+Session_impl::Session_connect_timeout_scope_guard::
+    Session_connect_timeout_scope_guard(Session_impl *parent)
+    : m_parent{parent}, m_start_time{std::chrono::steady_clock::now()} {
+  m_handler_id = m_parent->get_protocol().add_send_message_handler(
+      [this](xcl::XProtocol *, const xcl::XProtocol::Client_message_type_id,
+             const xcl::XProtocol::Message &) -> xcl::Handler_result {
+        const auto timeout =
+            m_parent->m_context->m_connection_config.m_timeout_session_connect;
+        // Infinite timeout, do not set message handler
+        if (timeout < 0) return Handler_result::Continue;
+
+        auto &connection = m_parent->get_protocol().get_connection();
+        const auto delta =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - m_start_time)
+                .count();
+        const auto new_timeout = (timeout - delta) / 1000;
+        connection.set_write_timeout(
+            details::make_vio_timeout((delta > timeout) ? 0 : new_timeout));
+        connection.set_read_timeout(
+            details::make_vio_timeout((delta > timeout) ? 0 : new_timeout));
+        return Handler_result::Continue;
+      });
+}
+
+Session_impl::Session_connect_timeout_scope_guard::
+    ~Session_connect_timeout_scope_guard() {
+  m_parent->get_protocol().remove_send_message_handler(m_handler_id);
+  auto &connection = m_parent->get_protocol().get_connection();
+  const auto read_timeout =
+      m_parent->m_context->m_connection_config.m_timeout_read;
+  connection.set_read_timeout(
+      details::make_vio_timeout((read_timeout < 0) ? -1 : read_timeout / 1000));
+  const auto write_timeout =
+      m_parent->m_context->m_connection_config.m_timeout_write;
+  connection.set_write_timeout(details::make_vio_timeout(
+      (write_timeout < 0) ? -1 : write_timeout / 1000));
 }
 
 static void initialize_xmessages() {

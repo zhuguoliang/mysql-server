@@ -1,4 +1,4 @@
-/* Copyright (c) 2010, 2017, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2010, 2019, Oracle and/or its affiliates. All rights reserved.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
@@ -258,15 +258,15 @@ static inline void inline_mysql_socket_set_state(MYSQL_SOCKET socket,
 }
 #endif /* HAVE_PSI_SOCKET_INTERFACE */
 
-  /**
-    @def mysql_socket_socket(K, D, T, P)
-    Create a socket.
-    @c mysql_socket_socket is a replacement for @c socket.
-    @param K PSI_socket_key for this instrumented socket
-    @param D Socket domain
-    @param T Protocol type
-    @param P Transport protocol
-  */
+/**
+  @def mysql_socket_socket(K, D, T, P)
+  Create a socket.
+  @c mysql_socket_socket is a replacement for @c socket.
+  @param K PSI_socket_key for this instrumented socket
+  @param D Socket domain
+  @param T Protocol type
+  @param P Transport protocol
+*/
 
 #ifdef HAVE_PSI_SOCKET_INTERFACE
 #define mysql_socket_socket(K, D, T, P) inline_mysql_socket_socket(K, D, T, P)
@@ -1167,6 +1167,6 @@ static inline int inline_mysql_socket_shutdown(
   return result;
 }
 
-  /** @} (end of group psi_api_socket) */
+/** @} (end of group psi_api_socket) */
 
 #endif

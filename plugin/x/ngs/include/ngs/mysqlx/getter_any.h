@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2019, Oracle and/or its affiliates. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
@@ -31,7 +31,7 @@
 
 #include "plugin/x/ngs/include/ngs/error_code.h"
 #include "plugin/x/ngs/include/ngs/ngs_error.h"
-#include "plugin/x/ngs/include/ngs_common/protocol_protobuf.h"
+#include "plugin/x/ngs/include/ngs/protocol/protocol_protobuf.h"
 
 namespace ngs {
 
@@ -42,8 +42,8 @@ class Getter_any {
     using namespace ::Mysqlx::Datatypes;
 
     if (Any::SCALAR != any.type())
-      throw ngs::Error_code(ER_X_INVALID_PROTOCOL_DATA,
-                            "Invalid data, expecting scalar");
+      throw Error_code(ER_X_INVALID_PROTOCOL_DATA,
+                       "Invalid data, expecting scalar");
 
     const Scalar &scalar = any.scalar();
 
@@ -64,8 +64,8 @@ class Getter_any {
         return static_cast<Value_type>(scalar.v_unsigned_int());
 
       default:
-        throw ngs::Error_code(ER_X_INVALID_PROTOCOL_DATA,
-                              "Invalid data, expected numeric type");
+        throw Error_code(ER_X_INVALID_PROTOCOL_DATA,
+                         "Invalid data, expected numeric type");
     }
   }
 
@@ -74,7 +74,7 @@ class Getter_any {
       const ::Mysqlx::Datatypes::Any &any, const Value_type &default_value) {
     try {
       return get_numeric_value<Value_type>(any);
-    } catch (const ngs::Error_code &) {
+    } catch (const Error_code &) {
     }
 
     return default_value;
@@ -84,12 +84,12 @@ class Getter_any {
   static void put_scalar_value_to_functor(const ::Mysqlx::Datatypes::Any &any,
                                           Functor &functor) {
     if (!any.has_type())
-      throw ngs::Error_code(ER_X_INVALID_PROTOCOL_DATA,
-                            "Invalid data, expecting type");
+      throw Error_code(ER_X_INVALID_PROTOCOL_DATA,
+                       "Invalid data, expecting type");
 
     if (::Mysqlx::Datatypes::Any::SCALAR != any.type())
-      throw ngs::Error_code(ER_X_INVALID_PROTOCOL_DATA,
-                            "Invalid data, expecting scalar");
+      throw Error_code(ER_X_INVALID_PROTOCOL_DATA,
+                       "Invalid data, expecting scalar");
 
     using ::Mysqlx::Datatypes::Scalar;
     const Scalar &scalar = any.scalar();
@@ -112,7 +112,7 @@ class Getter_any {
       case Scalar::V_OCTETS:
         throw_invalid_type_if_false(
             scalar, scalar.has_v_octets() && scalar.v_octets().has_value());
-        functor(scalar.v_octets().value());
+        functor(scalar.v_octets().value(), scalar.v_octets().content_type());
         break;
 
       case Scalar::V_DOUBLE:
@@ -146,9 +146,8 @@ class Getter_any {
   static void throw_invalid_type_if_false(
       const ::Mysqlx::Datatypes::Scalar &scalar, const bool is_valid) {
     if (!is_valid)
-      throw ngs::Error(ER_X_INVALID_PROTOCOL_DATA,
-                       "Missing field required for ScalarType: %d",
-                       scalar.type());
+      throw Error(ER_X_INVALID_PROTOCOL_DATA,
+                  "Missing field required for ScalarType: %d", scalar.type());
   }
 };
 

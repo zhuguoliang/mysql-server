@@ -1,4 +1,4 @@
-/* Copyright (c) 2014, 2018, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2014, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -565,11 +565,8 @@ int validate_plugin_server_requirements(Trans_param *param) {
   char *hostname, *uuid;
   uint port;
   unsigned int server_version;
-  st_server_ssl_variables server_ssl_variables = {false, NULL, NULL, NULL, NULL,
-                                                  NULL,  NULL, NULL, NULL, 0};
 
-  get_server_parameters(&hostname, &port, &uuid, &server_version,
-                        &server_ssl_variables);
+  get_server_parameters(&hostname, &port, &uuid, &server_version);
 
   Trans_context_info startup_pre_reqs;
   get_server_startup_prerequirements(startup_pre_reqs, false);
@@ -751,6 +748,31 @@ int test_channel_service_interface() {
   // Assert the channel is not there.
   exists = channel_is_active(interface_channel, CHANNEL_NO_THD);
   DBUG_ASSERT(!exists);
+
+  // Test the method to extract credentials - first a non existing channel
+  const char *user_arg = NULL;
+  char user_pass[MAX_PASSWORD_LENGTH + 1];
+  char *user_pass_pointer = user_pass;
+  size_t password_size = sizeof(user_pass);
+  error = channel_get_credentials(dummy_channel, &user_arg, &user_pass_pointer,
+                                  &password_size);
+  DBUG_ASSERT(error == RPL_CHANNEL_SERVICE_CHANNEL_DOES_NOT_EXISTS_ERROR);
+
+  // Now get channel credentials, after setting them
+
+  char dummy_user[] = "user";
+  char dummy_pass[] = "pass";
+
+  info.user = dummy_user;
+  info.password = dummy_pass;
+  error = channel_create(interface_channel, &info);
+  DBUG_ASSERT(!error);
+
+  error = channel_get_credentials(interface_channel, &user_arg,
+                                  &user_pass_pointer, &password_size);
+  DBUG_ASSERT(!error);
+  DBUG_ASSERT(strcmp(dummy_user, user_arg) == 0);
+  DBUG_ASSERT(strcmp(dummy_pass, user_pass_pointer) == 0);
 
   return (error && exists && running && gno && num_appliers && thread_id);
 }

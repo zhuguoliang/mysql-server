@@ -1,4 +1,4 @@
-/* Copyright (c) 2000, 2018, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2000, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -29,7 +29,6 @@
 #include <sys/types.h>
 #include <algorithm>
 
-#include "binary_log_types.h"
 #include "m_ctype.h"
 #include "my_byteorder.h"
 #include "my_compare.h"
@@ -437,14 +436,17 @@ static void do_cut_string_complex(Copy_field *copy) {  // Shorter string field
   const CHARSET_INFO *cs = copy->from_field()->charset();
   const uchar *from_end = copy->from_ptr + copy->from_length();
   size_t copy_length = cs->cset->well_formed_len(
-      cs, (char *)copy->from_ptr, (char *)from_end,
-      copy->to_length() / cs->mbmaxlen, &well_formed_error);
+      cs, pointer_cast<const char *>(copy->from_ptr),
+      pointer_cast<const char *>(from_end), copy->to_length() / cs->mbmaxlen,
+      &well_formed_error);
   if (copy->to_length() < copy_length) copy_length = copy->to_length();
   memcpy(copy->to_ptr, copy->from_ptr, copy_length);
 
   /* Check if we lost any important characters */
   if (well_formed_error ||
-      cs->cset->scan(cs, (char *)copy->from_ptr + copy_length, (char *)from_end,
+      cs->cset->scan(cs,
+                     pointer_cast<const char *>(copy->from_ptr) + copy_length,
+                     pointer_cast<const char *>(from_end),
                      MY_SEQ_SPACES) < (copy->from_length() - copy_length)) {
     copy->to_field()->set_warning(Sql_condition::SL_WARNING,
                                   WARN_DATA_TRUNCATED, 1);
@@ -903,15 +905,18 @@ type_conversion_status field_conv(Field *to, Field *from) {
     if (from->type() == MYSQL_TYPE_TIME) {
       from->get_time(&ltime);
       if (current_thd->is_fsp_truncate_mode())
-        nr = TIME_to_ulonglong_time(&ltime);
+        nr = TIME_to_ulonglong_time(ltime);
       else
-        nr = TIME_to_ulonglong_time_round(&ltime);
+        nr = TIME_to_ulonglong_time_round(ltime);
     } else {
       from->get_date(&ltime, TIME_FUZZY_DATE);
       if (current_thd->is_fsp_truncate_mode())
-        nr = TIME_to_ulonglong_datetime(&ltime);
-      else
-        nr = TIME_to_ulonglong_datetime_round(&ltime);
+        nr = TIME_to_ulonglong_datetime(ltime);
+      else {
+        nr = propagate_datetime_overflow(current_thd, [&](int *w) {
+          return TIME_to_ulonglong_datetime_round(ltime, w);
+        });
+      }
     }
     return to->store(ltime.neg ? -nr : nr, 0);
   } else if (from->is_temporal() && (to->result_type() == REAL_RESULT ||
@@ -938,7 +943,21 @@ type_conversion_status field_conv(Field *to, Field *from) {
     return to->store(from->val_real());
   } else if (from_type == MYSQL_TYPE_JSON && to->is_temporal()) {
     MYSQL_TIME ltime;
-    if (from->get_time(&ltime)) return TYPE_ERR_BAD_VALUE;
+    bool res = true;
+    switch (to_type) {
+      case MYSQL_TYPE_TIME:
+        res = from->get_time(&ltime);
+        break;
+      case MYSQL_TYPE_DATETIME:
+      case MYSQL_TYPE_TIMESTAMP:
+      case MYSQL_TYPE_DATE:
+      case MYSQL_TYPE_NEWDATE:
+        res = from->get_date(&ltime, 0);
+        break;
+      default:
+        DBUG_ASSERT(0);
+    }
+    if (res) return TYPE_ERR_BAD_VALUE;
     return to->store_time(&ltime);
   } else if ((from->result_type() == STRING_RESULT &&
               (to->result_type() == STRING_RESULT ||

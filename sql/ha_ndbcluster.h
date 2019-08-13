@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2000, 2018, Oracle and/or its affiliates. All rights reserved.
+   Copyright (c) 2000, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -32,10 +32,7 @@
 
 #include "sql/sql_base.h"
 
-/* DDL names have to fit in system table ndb_schema */
-#define NDB_MAX_DDL_NAME_BYTESIZE 63
-#define NDB_MAX_DDL_NAME_BYTESIZE_STR "63"
-
+#include "sql/ha_ndbcluster_cond.h"
 #include "sql/ndb_conflict.h"
 #include "sql/ndb_table_map.h"
 #include "sql/partitioning/partition_handler.h"
@@ -124,6 +121,7 @@ struct st_ndb_status {
   long number_of_ready_data_nodes;
   long connect_count;
   long execute_count;
+  long trans_hint_count;
   long scan_count;
   long pruned_scan_count;
   long schema_locks_count;
@@ -134,8 +132,6 @@ struct st_ndb_status {
   long pushed_reads;
   long long last_commit_epoch_server;
   long long last_commit_epoch_session;
-  long transaction_no_hint_count[MAX_NDB_NODES];
-  long transaction_hint_count[MAX_NDB_NODES];
   long long api_client_stats[Ndb::NumClientStatistics];
   const char * system_name;
 };
@@ -173,6 +169,7 @@ public:
   int index_prev(uchar *buf) override;
   int index_first(uchar *buf) override;
   int index_last(uchar *buf) override;
+  int index_next_same(uchar *buf, const uchar *key, uint keylen) override;
   int index_read_last(uchar * buf, const uchar * key, uint key_len) override;
   int rnd_init(bool scan) override;
   int rnd_end() override;
@@ -207,6 +204,13 @@ public:
                                 Cost_estimate *cost) override;
 
   void append_create_info(String *packet) override;
+
+  /* Get partition row type
+  @param[in] table   partition table
+  @param[in] part_id Id of partition for which row type to be retrieved
+  @return Partition row type. */
+  enum row_type get_partition_row_type(const dd::Table *table,
+                                       uint part_id) override;
 
  private:
   bool choose_mrr_impl(uint keyno, uint n_ranges, ha_rows n_rows,
@@ -339,40 +343,58 @@ public:
      cond_push()
      cond   Condition to be pushed. The condition tree must not be
      modified by the by the caller.
+     other_tbls_ok  Are other tables allowed to be referred
+     from the condition terms pushed down.
    RETURN
      The 'remainder' condition that caller must use to filter out records.
      NULL means the handler will not return rows that do not match the
      passed condition.
    NOTES
-   The pushed conditions form a stack (from which one can remove the
-   last pushed condition using cond_pop).
    The table handler filters out rows using (pushed_cond1 AND pushed_cond2 
    AND ... AND pushed_condN)
    or less restrictive condition, depending on handler's capabilities.
    
-   handler->reset() call empties the condition stack.
-   Calls to rnd_init/rnd_end, index_init/index_end etc do not affect the  
-   condition stack.
+   handler->reset() call discard any pushed conditions.
+   Calls to rnd_init/rnd_end, index_init/index_end etc do not affect
+   any condition being pushed.
    The current implementation supports arbitrary AND/OR nested conditions
    with comparisons between columns and constants (including constant
    expressions and function calls) and the following comparison operators:
    =, !=, >, >=, <, <=, like, "not like", "is null", and "is not null". 
    Negated conditions are supported by NOT which generate NAND/NOR groups.
  */ 
-  const Item *cond_push(const Item *cond) override;
- /*
-   Pop the top condition from the condition stack of the handler instance.
-   SYNOPSIS
-     cond_pop()
-     Pops the top if condition stack, if stack is not empty
- */
-  void cond_pop() override;
+  const Item *cond_push(const Item *cond,
+                        bool other_tbls_ok) override;
+
+public:
+  /**
+   * Generate the ScanFilters code for the condition(s) previously
+   * accepted for cond_push'ing.
+   * If code generation failed, the handler will evaluate the
+   * condition for every row returned from NDB.
+   */
+  void generate_scan_filter(NdbInterpretedCode *code,
+                            NdbScanOperation::ScanOptions *options);
+
+  /**
+   * Generate a ScanFilter using both the pushed condition AND
+   * add equality predicates matching the 'key' supplied as
+   * arguments.
+   * @return 1 if generation of the key part failed.
+   */
+  int generate_scan_filter_with_key(
+                            NdbInterpretedCode *code,
+                            NdbScanOperation::ScanOptions *options,
+                            const KEY *key_info,
+                            const key_range *start_key,
+                            const key_range *end_key);
+
 private:
   bool maybe_pushable_join(const char*& reason) const;
 public:
   int assign_pushed_join(const ndb_pushed_join* pushed_join);
   uint number_of_pushed_joins() const override;
-  const TABLE* root_of_pushed_join() const override;
+  const TABLE* member_of_pushed_join() const override;
   const TABLE* parent_of_pushed_join() const override;
 
   int index_read_pushed(uchar *buf, const uchar *key,
@@ -386,8 +408,8 @@ public:
   int ndb_err(NdbTransaction*);
 
   enum_alter_inplace_result
-  check_if_supported_inplace_alter(TABLE *altered_table,
-                                   Alter_inplace_info *ha_alter_info) override;
+    check_if_supported_inplace_alter(TABLE *altered_table,
+                                     Alter_inplace_info *ha_alter_info) override;
 
 private:
   bool parse_comment_changes(NdbDictionary::Table *new_tab,
@@ -418,6 +440,17 @@ public:
   void prepare_inplace__drop_index(uint key_num);
   int inplace__final_drop_index(TABLE *table_arg);
 
+  enum_alter_inplace_result
+    supported_inplace_field_change(Alter_inplace_info*,
+                                   Field*, Field*, bool, bool) const;
+  bool table_storage_changed(HA_CREATE_INFO*) const;
+  bool column_has_index(TABLE*, uint, uint, uint) const;
+  enum_alter_inplace_result
+    supported_inplace_ndb_column_change(uint, TABLE*,
+                                        Alter_inplace_info*,
+                                        bool, bool) const;
+  enum_alter_inplace_result
+    supported_inplace_column_change(THD*, TABLE*, uint, Field*, Alter_inplace_info*) const;
   enum_alter_inplace_result
     check_inplace_alter_supported(TABLE *altered_table,
                                   Alter_inplace_info *ha_alter_info);
@@ -477,6 +510,7 @@ public:
                                       Ndb_fk_list&);
   static int recreate_fk_for_truncate(THD*, Ndb*, const char*,
                                       Ndb_fk_list&);
+  bool has_fk_dependency(THD*, const NdbDictionary::Column*) const;
   int check_default_values(const NdbDictionary::Table* ndbtab);
   int get_metadata(THD *thd, const dd::Table* table_def);
   void release_metadata(THD *thd, Ndb *ndb);
@@ -534,9 +568,9 @@ public:
   int set_auto_inc_val(THD *thd, Uint64 value);
   int next_result(uchar *buf); 
   int close_scan();
-  void unpack_record(uchar *dst_row, const uchar *src_row);
-  void unpack_record_and_set_generated_fields(TABLE *, uchar *dst_row,
-                                              const uchar *src_row);
+  int unpack_record(uchar *dst_row, const uchar *src_row);
+  int unpack_record_and_set_generated_fields(TABLE *, uchar *dst_row,
+                                             const uchar *src_row);
   void set_dbname(const char *pathname);
   void set_tabname(const char *pathname);
 
@@ -552,7 +586,7 @@ public:
 
   int get_blob_values(const NdbOperation *ndb_op, uchar *dst_record,
                       const MY_BITMAP *bitmap);
-  int set_blob_values(const NdbOperation *ndb_op, my_ptrdiff_t row_offset,
+  int set_blob_values(const NdbOperation *ndb_op, ptrdiff_t row_offset,
                       const MY_BITMAP *bitmap, uint *set_count, bool batch);
   friend int g_get_ndb_blobs_value(NdbBlob *ndb_blob, void *arg);
   void release_blobs_buffer();
@@ -751,7 +785,8 @@ public:
   NdbQuery* m_active_query;              // Pushed query instance executing
   NdbQueryOperation* m_pushed_operation; // Pushed operation instance
 
-  ha_ndbcluster_cond *m_cond;
+  /* In case we failed to push a 'pushed_cond', the handler will evaluate it */
+  ha_ndbcluster_cond m_cond;
   bool m_disable_multi_read;
   uchar *m_multi_range_result_ptr;
   NdbIndexScanOperation *m_multi_cursor;

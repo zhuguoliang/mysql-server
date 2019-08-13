@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2018, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 1996, 2019, Oracle and/or its affiliates. All Rights Reserved.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
@@ -184,7 +184,7 @@ static dd::Tablespace *dd_upgrade_get_tablespace(
     strncpy(name, tablespace_name.c_str(), MAX_FULL_NAME_LEN);
   } else {
     ut_ad(DICT_TF_HAS_SHARED_SPACE(ib_table->flags));
-    ut_ad(ib_table->tablespace != NULL);
+    if (ib_table->tablespace == NULL) return (ts_obj);
     strncpy(name, ib_table->tablespace(), MAX_FULL_NAME_LEN);
   }
 
@@ -553,7 +553,7 @@ static bool dd_upgrade_match_index(TABLE *srv_table, dict_index_t *index) {
     }
   }
 
-  DBUG_EXECUTE_IF("dd_upgrade_srict_mode", ut_ad(index->type == ind_type););
+  DBUG_EXECUTE_IF("dd_upgrade_strict_mode", ut_ad(index->type == ind_type););
 
   if (index->type != ind_type) {
     ib::error(ER_IB_MSG_252) << "Index name: " << index->name
@@ -803,7 +803,7 @@ static bool dd_upgrade_partitions(THD *thd, const char *norm_name,
 static void dd_upgrade_set_row_type(dict_table_t *ib_table,
                                     dd::Table *dd_table) {
   if (ib_table) {
-    const ulint flags = ib_table->flags;
+    const uint32_t flags = ib_table->flags;
 
     switch (dict_tf_get_rec_format(flags)) {
       case REC_FORMAT_REDUNDANT:
@@ -887,7 +887,6 @@ bool dd_upgrade_table(THD *thd, const char *db_name, const char *table_name,
     dd::cache::Dictionary_client::Auto_releaser releaser(dd_client);
     dd::Tablespace *dd_space =
         dd_upgrade_get_tablespace(thd, dd_client, ib_table);
-    ut_ad(dd_space != nullptr);
 
     if (dd_space == nullptr) {
       dict_table_close(ib_table, false, false);
@@ -1018,7 +1017,7 @@ typedef struct {
   /** Tablespace name */
   const char *name;
   /** Tablespace flags */
-  ulint flags;
+  uint32_t flags;
   /** Path of the tablespace file */
   const char *path;
 } upgrade_space_t;
@@ -1054,6 +1053,15 @@ static uint32_t dd_upgrade_register_tablespace(
 
   dd_file->set_filename(upgrade_space->path);
 
+  if (!FSP_FLAGS_GET_ENCRYPTION(upgrade_space->flags)) {
+    /* Update DD Option value, for Unencryption */
+    dd_space->options().set("encryption", "N");
+
+  } else {
+    /* Update DD Option value, for Encryption */
+    dd_space->options().set("encryption", "Y");
+  }
+
   if (dd_client->store(dd_space)) {
     /* It would be better to return thd->get_stmt_da()->mysql_errno(),
     however, server doesn't fill in the errno during bootstrap. */
@@ -1087,7 +1095,7 @@ int dd_upgrade_tablespace(THD *thd) {
     const char *err_msg;
     space_id_t space;
     const char *name;
-    ulint flags;
+    uint32_t flags;
     std::string new_tablespace_name;
 
     /* Extract necessary information from a SYS_TABLESPACES row */
@@ -1141,6 +1149,26 @@ int dd_upgrade_tablespace(THD *thd) {
           (tablespace_name.find("mysql/innodb_index_stats") == 0)) {
         orig_name.erase(orig_name.end() - 4, orig_name.end());
         orig_name.append("_backup57.ibd");
+      } else if (is_file_per_table) {
+        /* Validate whether the tablespace file exists before making
+        the entry in dd::tablespaces*/
+
+        mutex_enter(&dict_sys->mutex);
+        fil_space_t *fil_space = fil_space_get(space);
+        mutex_exit(&dict_sys->mutex);
+
+        /* If the file is not already opened, check for its existence
+        by opening it in read-only mode. */
+        if (fil_space == nullptr) {
+          Datafile df;
+          df.set_filepath(orig_name.c_str());
+          if (df.open_read_only(false) != DB_SUCCESS) {
+            mem_heap_free(heap);
+            btr_pcur_close(&pcur);
+            DBUG_RETURN(HA_ERR_TABLESPACE_MISSING);
+          }
+          df.close();
+        }
       }
 
       ut_ad(filename != NULL);
@@ -1330,6 +1358,60 @@ static void dd_upgrade_drop_sys_tables() {
   mutex_exit(&dict_sys->mutex);
 }
 
+/** Drop all InnoDB stats backup tables (innodb_*_stats_backup57). This is done
+ * only at the end of successful upgrade */
+static void dd_upgrade_drop_stats_backup_tables() {
+  ut_ad(srv_is_upgrade_mode);
+
+  space_id_t space_id_index_stats =
+      fil_space_get_id_by_name("mysql/innodb_index_stats_backup57");
+  space_id_t space_id_table_stats =
+      fil_space_get_id_by_name("mysql/innodb_table_stats_backup57");
+  char *index_stats_filepath = fil_space_get_first_path(space_id_index_stats);
+  char *table_stats_filepath = fil_space_get_first_path(space_id_table_stats);
+
+  trx_t *trx = trx_allocate_for_mysql();
+
+  if (space_id_index_stats != SPACE_UNKNOWN) {
+    dberr_t err;
+
+    err = fil_close_tablespace(trx, space_id_index_stats);
+    if (err != DB_SUCCESS) {
+      ib::info(ER_IB_MSG_227)
+          << "dict_stats_evict_tablespace: "
+          << " fil_close_tablespace(" << space_id_index_stats << ") failed! "
+          << ut_strerr(err);
+    }
+
+    if (!fil_delete_file(index_stats_filepath)) {
+      ib::info(ER_IB_MSG_990)
+          << "Failed to delete the datafile '" << index_stats_filepath << "'!";
+    }
+    ut_free(index_stats_filepath);
+  }
+
+  if (space_id_table_stats != SPACE_UNKNOWN) {
+    dberr_t err;
+
+    err = fil_close_tablespace(trx, space_id_table_stats);
+    if (err != DB_SUCCESS) {
+      ib::info(ER_IB_MSG_228)
+          << "dict_stats_evict_tablespace: "
+          << " fil_close_tablespace(" << space_id_index_stats << ") failed! "
+          << ut_strerr(err);
+    }
+
+    if (!fil_delete_file(table_stats_filepath)) {
+      ib::info(ER_IB_MSG_990)
+          << "Failed to delete the datafile '" << table_stats_filepath << "'!";
+    }
+    ut_free(table_stats_filepath);
+  }
+
+  trx_commit_for_mysql(trx);
+  trx_free_for_mysql(trx);
+}
+
 /** Rename back the FTS AUX tablespace names from 8.0 format to 5.7
 format on upgrade failure, else mark FTS aux tables evictable
 @param[in]	failed_upgrade		true on upgrade failure, else
@@ -1378,6 +1460,9 @@ int dd_upgrade_finish(THD *thd, bool failed_upgrade) {
 
     /* Flush entire buffer pool. */
     buf_flush_sync_all_buf_pools();
+
+    /* Close and delete the backup stats tables */
+    dd_upgrade_drop_stats_backup_tables();
   }
 
   tables_with_fts.clear();

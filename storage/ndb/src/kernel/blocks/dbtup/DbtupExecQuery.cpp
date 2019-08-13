@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2018, Oracle and/or its affiliates. All rights reserved.
+   Copyright (c) 2003, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -44,6 +44,7 @@
 
 #define JAM_FILE_ID 422
 
+#define TUP_NO_TUPLE_FOUND 626
 #ifdef VM_TRACE
 //#define DEBUG_LCP 1
 //#define DEBUG_DELETE 1
@@ -398,15 +399,6 @@ Dbtup::setup_read(KeyReqStruct *req_struct,
       return false;
     }
   }
-  if (unlikely(bits & Tuple_header::FREE))
-  {
-    /**
-     * The tuple could be FREE'ed due to an INSERT operation which aborted
-     * while we waited for ACC to grant us access to the tuple.
-     */
-    terrorCode= ZTUPLE_DELETED_ERROR;
-    return false;
-  }
   if (likely(currOpPtr.i == RNIL))
   {
     jamDebug();
@@ -545,7 +537,18 @@ Dbtup::load_diskpage(Signal* signal,
   PagePtr page_ptr;
   Uint32* tmp= get_ptr(&page_ptr, &regOperPtr->m_tuple_location, regTabPtr);
   Tuple_header* ptr= (Tuple_header*)tmp;
-  
+
+  if (((flags & 7) == ZREAD) &&
+      ptr->m_header_bits & Tuple_header::DELETE_WAIT)
+  {
+    jam();
+    /**
+     * Tuple is already deleted and must not be read at this point in
+     * time since when we come back from real-time break the row
+     * will already be removed and invalidated.
+     */
+    return -(TUP_NO_TUPLE_FOUND);
+  }
   int res= 1;
   if(ptr->m_header_bits & Tuple_header::DISK_PART)
   {
@@ -638,7 +641,18 @@ Dbtup::load_diskpage_scan(Signal* signal,
   PagePtr page_ptr;
   Uint32* tmp= get_ptr(&page_ptr, &regOperPtr->m_tuple_location, regTabPtr);
   Tuple_header* ptr= (Tuple_header*)tmp;
-  
+
+  if (ptr->m_header_bits & Tuple_header::DELETE_WAIT)
+  {
+    jam();
+    /**
+     * Tuple is already deleted and must not be read at this point in
+     * time since when we come back from real-time break the row
+     * will already be removed and invalidated.
+     */
+    return -(TUP_NO_TUPLE_FOUND);
+  }
+
   int res= 1;
   if(ptr->m_header_bits & Tuple_header::DISK_PART)
   {
@@ -1321,6 +1335,7 @@ Dbtup::setup_fixed_part(KeyReqStruct* req_struct,
 {
   ndbassert(regOperPtr->op_type == ZINSERT ||
             (! (req_struct->m_tuple_ptr->m_header_bits & Tuple_header::FREE)));
+
   Uint32 descr_start = regTabPtr->tabDescriptor;
   TableDescriptor *loc_tab_descriptor = tableDescriptor;
   Uint32 num_attr= regTabPtr->m_no_of_attributes;
@@ -2090,14 +2105,14 @@ int Dbtup::handleInsertReq(Signal* signal,
   if (ERROR_INSERTED(4014))
   {
     dst = 0;
-    goto undo_buffer_error;
+    goto trans_mem_error;
   }
 
   dst= alloc_copy_tuple(regTabPtr, &regOperPtr.p->m_copy_tuple_location);
 
   if (unlikely(dst == 0))
   {
-    goto undo_buffer_error;
+    goto trans_mem_error;
   }
   tuple_ptr= req_struct->m_tuple_ptr= dst;
   set_change_mask_info(regTabPtr, get_change_mask_ptr(regTabPtr, dst));
@@ -2476,9 +2491,9 @@ size_change_error:
   terrorCode = ZMEM_NOMEM_ERROR;
   goto exit_error;
   
-undo_buffer_error:
+trans_mem_error:
   jam();
-  terrorCode= ZNO_UNDO_BUFFER_MEMORY_ERROR;
+  terrorCode= ZNO_COPY_TUPLE_MEMORY_ERROR;
   regOperPtr.p->m_undo_buffer_space = 0;
   if (mem_insert)
     regOperPtr.p->m_tuple_location.setNull();

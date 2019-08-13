@@ -1,4 +1,4 @@
-/* Copyright (c) 2018, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2018, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -405,6 +405,7 @@ sort_and_get_lowest_version_member_position(
 
   /* to avoid read compatibility issue leader should be picked only from lowest
      version members so save position where member version differs.
+     From 8.0.17 patch version will be considered during version comparison.
 
      set lowest_version_end when major version changes
 
@@ -417,9 +418,25 @@ sort_and_get_lowest_version_member_position(
          the members to be considered for election will be:
             5.7.20, 5.7.21
          and member weight based algorithm will be used to elect primary
+
+     eg: for a list: 8.0.17, 8.0.18, 8.0.19
+         the members to be considered for election will be:
+            8.0.17
+
+     eg: for a list: 8.0.13, 8.0.17, 8.0.18
+         the members to be considered for election will be:
+            8.0.13, 8.0.17, 8.0.18
+         and member weight based algorithm will be used to elect primary
   */
+
   for (it = all_members_info->begin() + 1; it != all_members_info->end();
        it++) {
+    if (first_member->get_member_version() >=
+            PRIMARY_ELECTION_PATCH_CONSIDERATION &&
+        (first_member->get_member_version() != (*it)->get_member_version())) {
+      lowest_version_end = it;
+      break;
+    }
     if (lowest_major_version !=
         (*it)->get_member_version().get_major_version()) {
       lowest_version_end = it;
@@ -467,7 +484,8 @@ int Primary_election_handler::before_transaction_begin(
       static_cast<enum_group_replication_consistency_level>(gr_consistency);
 
   if (consistency_level ==
-      GROUP_REPLICATION_CONSISTENCY_BEFORE_ON_PRIMARY_FAILOVER) {
+          GROUP_REPLICATION_CONSISTENCY_BEFORE_ON_PRIMARY_FAILOVER ||
+      consistency_level == GROUP_REPLICATION_CONSISTENCY_AFTER) {
     DBUG_RETURN(
         hold_transactions->wait_until_primary_failover_complete(hold_timeout));
   }

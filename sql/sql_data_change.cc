@@ -1,4 +1,4 @@
-/* Copyright (c) 2000, 2018, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2000, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -123,8 +123,7 @@ bool COPY_INFO::get_function_default_columns(TABLE *table) {
       Item *lvalue_item;
       while ((lvalue_item = lvalue_it++) != NULL)
         lvalue_item->walk(
-            &Item::remove_column_from_bitmap,
-            Item::enum_walk(Item::WALK_POSTFIX | Item::WALK_SUBQUERY),
+            &Item::remove_column_from_bitmap, enum_walk::SUBQUERY_POSTFIX,
             reinterpret_cast<uchar *>(m_function_default_columns));
     }
   }
@@ -163,12 +162,13 @@ bool COPY_INFO::set_function_defaults(TABLE *table) {
     BLOB value is handled. When update_generated_write_fields() is removed,
     blobs_need_not_keep_old_value() can also be removed.
   */
+  bool res = false;
   if (table->has_gcol()) {
     table->blobs_need_not_keep_old_value();
-    update_generated_write_fields(table->write_set, table);
+    res = update_generated_write_fields(table->write_set, table);
   }
 
-  DBUG_RETURN(false);
+  DBUG_RETURN(res);
 }
 
 bool COPY_INFO::ignore_last_columns(TABLE *table, uint count) {

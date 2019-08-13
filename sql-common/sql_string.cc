@@ -1,4 +1,4 @@
-/* Copyright (c) 2000, 2018, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2000, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -87,9 +87,9 @@ bool String::real_alloc(size_t length) {
 
    @retval false Either the copy operation is complete or, if the size of the
    new buffer is smaller than the currently allocated buffer (if one exists),
-   no allocation occured.
+   no allocation occurred.
 
-   @retval true An error occured when attempting to allocate memory or memory
+   @retval true An error occurred when attempting to allocate memory or memory
    allocation length exceeded allowed limit (4GB) for String Class.
 */
 bool String::mem_realloc(size_t alloc_length, bool force_on_heap) {
@@ -105,8 +105,8 @@ bool String::mem_realloc(size_t alloc_length, bool force_on_heap) {
     m_alloced_length = 0;
   }
 
-  if (m_alloced_length < len) {  // Available bytes are not enough
-  // Signal an error if len exceeds uint32 max on 64-bit word platform.
+  if (m_alloced_length < len) {  // Available bytes are not enough.
+    // Signal an error if len exceeds uint32 max on 64-bit word platform.
 #if defined(__WORDSIZE) && (__WORDSIZE == 64)
     if (len > std::numeric_limits<uint32>::max()) return true;
 #endif
@@ -141,19 +141,19 @@ inline size_t String::next_realloc_exp_size(size_t sz) {
 }
 
 /**
-  This function is used by the various append() member functions, to ensure
-  that append() has amortized constant cost. Once we have started to allocate
-  buffer on the heap, we increase the buffer size exponentially, rather
-  than linearly.
+  This function is used by the various append() and replace() member functions,
+  to ensure that functions have amortized constant cost.
+  Once we have started to allocate buffer on the heap, we increase the buffer
+  size exponentially, rather than linearly.
 
   @param alloc_length The requested string size in characters, excluding any
                       null terminator.
 
   @retval false Either the copy operation is complete or, if the size of the
   new buffer is smaller than the currently allocated buffer (if one exists),
-  no allocation occured.
+  no allocation occurred.
 
-  @retval true An error occured when attempting to allocate memory.
+  @retval true An error occurred when attempting to allocate memory.
 
   @see mem_realloc.
  */
@@ -679,7 +679,7 @@ bool String::replace(size_t offset, size_t arg_length, const char *to,
               m_length - offset - arg_length);
     } else {
       if (diff) {
-        if (mem_realloc(m_length + diff)) return true;
+        if (mem_realloc_exp(m_length + diff)) return true;
         memmove(m_ptr + offset + to_length, m_ptr + offset + arg_length,
                 m_length - offset - arg_length);
       }
@@ -741,8 +741,9 @@ void qs_append(uint i, String *str) {
 */
 
 int sortcmp(const String *s, const String *t, const CHARSET_INFO *cs) {
-  return cs->coll->strnncollsp(cs, (uchar *)s->ptr(), s->length(),
-                               (uchar *)t->ptr(), t->length());
+  return cs->coll->strnncollsp(
+      cs, pointer_cast<const uchar *>(s->ptr()), s->length(),
+      pointer_cast<const uchar *>(t->ptr()), t->length());
 }
 
 /*
@@ -964,7 +965,8 @@ size_t well_formed_copy_nchars(const CHARSET_INFO *to_cs, char *to,
 
     for (; nchars; nchars--) {
       const char *from_prev = from;
-      if ((cnvres = (*mb_wc)(from_cs, &wc, (uchar *)from, from_end)) > 0)
+      if ((cnvres = (*mb_wc)(from_cs, &wc, pointer_cast<const uchar *>(from),
+                             from_end)) > 0)
         from += cnvres;
       else if (cnvres == MY_CS_ILSEQ) {
         if (!*well_formed_error_pos) *well_formed_error_pos = from;
@@ -1203,7 +1205,7 @@ bool validate_string(const CHARSET_INFO *cs, const char *str, size_t length,
 
   while (from < from_end) {
     my_wc_t wc;
-    int cnvres = (*mb_wc)(cs, &wc, (uchar *)from, from_end);
+    int cnvres = (*mb_wc)(cs, &wc, pointer_cast<const uchar *>(from), from_end);
     if (cnvres <= 0) {
       *valid_length = from - reinterpret_cast<const uchar *>(str);
       return true;

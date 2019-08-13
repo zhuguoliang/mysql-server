@@ -1,4 +1,4 @@
-# Copyright (c) 2009, 2018, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2009, 2019, Oracle and/or its affiliates. All rights reserved.
 # 
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
@@ -32,7 +32,7 @@ INCLUDE (CheckCXXSourceRuns)
 INCLUDE (CheckSymbolExists)
 
 
-IF(CMAKE_SYSTEM_NAME MATCHES "SunOS" AND CMAKE_COMPILER_IS_GNUCXX)
+IF(SOLARIS AND CMAKE_COMPILER_IS_GNUCXX)
   ## We will be using gcc to generate .so files
   ## Add C flags (e.g. -m64) to CMAKE_SHARED_LIBRARY_C_FLAGS
   ## The client library contains C++ code, so add dependency on libstdc++
@@ -49,12 +49,6 @@ IF(NOT SYSTEM_TYPE)
   ELSE()
     SET(SYSTEM_TYPE ${CMAKE_SYSTEM_NAME})
   ENDIF()
-ENDIF()
-
-# Probobuf 2.6.1 on Sparc. Both gcc and Solaris Studio need this.
-IF(CMAKE_SYSTEM_NAME MATCHES "SunOS" AND
-    SIZEOF_VOIDP EQUAL 8 AND CMAKE_SYSTEM_PROCESSOR MATCHES "sparc")
-  ADD_DEFINITIONS(-DSOLARIS_64BIT_ENABLED)
 ENDIF()
 
 # Check to see if we are using LLVM's libc++ rather than e.g. libstd++
@@ -108,6 +102,10 @@ ENDFUNCTION()
 FIND_PACKAGE (Threads)
 
 IF(UNIX)
+  IF(FREEBSD)
+    MYSQL_CHECK_PKGCONFIG()
+    PKG_CHECK_MODULES(LIBUNWIND libunwind)
+  ENDIF()
   MY_SEARCH_LIBS(floor m LIBM)
   IF(NOT LIBM)
     MY_SEARCH_LIBS(__infinity m LIBM)
@@ -153,7 +151,7 @@ IF(UNIX)
     SET(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} -fsanitize=address")
   ENDIF()
 
-  IF(WITH_ASAN OR WITH_TSAN)
+  IF(WITH_ASAN OR WITH_LSAN OR WITH_TSAN)
     IF(CMAKE_USE_PTHREADS_INIT AND NOT CMAKE_THREAD_LIBS_INIT)
       MESSAGE(STATUS "No CMAKE_THREAD_LIBS_INIT ??")
       SET(CMAKE_THREAD_LIBS_INIT "-lpthread")
@@ -264,7 +262,6 @@ IF(WITH_ASAN)
 ENDIF()
 CHECK_FUNCTION_EXISTS (_aligned_malloc HAVE_ALIGNED_MALLOC)
 CHECK_FUNCTION_EXISTS (backtrace HAVE_BACKTRACE)
-CHECK_FUNCTION_EXISTS (printstack HAVE_PRINTSTACK)
 CHECK_FUNCTION_EXISTS (index HAVE_INDEX)
 CHECK_FUNCTION_EXISTS (chown HAVE_CHOWN)
 CHECK_FUNCTION_EXISTS (cuserid HAVE_CUSERID)
@@ -302,6 +299,7 @@ CHECK_FUNCTION_EXISTS (posix_fallocate HAVE_POSIX_FALLOCATE)
 CHECK_FUNCTION_EXISTS (posix_memalign HAVE_POSIX_MEMALIGN)
 CHECK_FUNCTION_EXISTS (pread HAVE_PREAD) # Used by NDB
 CHECK_FUNCTION_EXISTS (pthread_condattr_setclock HAVE_PTHREAD_CONDATTR_SETCLOCK)
+CHECK_FUNCTION_EXISTS (pthread_getaffinity_np HAVE_PTHREAD_GETAFFINITY_NP)
 CHECK_FUNCTION_EXISTS (pthread_sigmask HAVE_PTHREAD_SIGMASK)
 CHECK_FUNCTION_EXISTS (setfd HAVE_SETFD) # Used by libevent (never true)
 CHECK_FUNCTION_EXISTS (sigaction HAVE_SIGACTION)
@@ -351,6 +349,13 @@ CHECK_SYMBOL_EXISTS(TIOCGWINSZ "sys/ioctl.h" GWINSZ_IN_SYS_IOCTL)
 CHECK_SYMBOL_EXISTS(FIONREAD "sys/ioctl.h" FIONREAD_IN_SYS_IOCTL)
 CHECK_SYMBOL_EXISTS(FIONREAD "sys/filio.h" FIONREAD_IN_SYS_FILIO)
 CHECK_SYMBOL_EXISTS(MADV_DONTDUMP "sys/mman.h" HAVE_MADV_DONTDUMP)
+CHECK_CXX_SOURCE_COMPILES(
+"#include <sys/types.h>
+ #include <sys/stat.h>
+ #include <fcntl.h>
+int main() {
+  long long int foo = O_TMPFILE;
+}" HAVE_O_TMPFILE)
 
 # On Solaris, it is only visible in C99 mode
 CHECK_SYMBOL_EXISTS(isinf "math.h" HAVE_C_ISINF)
@@ -374,6 +379,19 @@ ENDIF()
 CHECK_FUNCTION_EXISTS (timer_create HAVE_TIMER_CREATE)
 CHECK_FUNCTION_EXISTS (timer_settime HAVE_TIMER_SETTIME)
 CHECK_FUNCTION_EXISTS (kqueue HAVE_KQUEUE)
+
+# Check whether the setns() API function supported by a target platform
+CHECK_C_SOURCE_RUNS("
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+#include <sched.h>
+int main()
+{
+  (void)setns(0, 0);
+  return 0;
+}" HAVE_SETNS)
+
 CHECK_SYMBOL_EXISTS(EVFILT_TIMER "sys/types.h;sys/event.h;sys/time.h" HAVE_EVFILT_TIMER)
 IF(HAVE_KQUEUE AND HAVE_EVFILT_TIMER)
   SET(HAVE_KQUEUE_TIMERS 1 CACHE INTERNAL "Have kqueue timer-related filter")
@@ -401,11 +419,6 @@ set(CMAKE_REQUIRED_DEFINITIONS ${CMAKE_REQUIRED_DEFINITIONS}
         -D__STDC_LIMIT_MACROS -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS)
 
 SET(CMAKE_EXTRA_INCLUDE_FILES stdint.h stdio.h sys/types.h time.h)
-
-CHECK_TYPE_SIZE(uint8_t HAVE_UINT8_T)
-CHECK_TYPE_SIZE(uint16_t HAVE_UINT16_T)
-CHECK_TYPE_SIZE(uint32_t HAVE_UINT32_T)
-CHECK_TYPE_SIZE(uint64_t HAVE_UINT64_T)
 
 CHECK_TYPE_SIZE("void *"    SIZEOF_VOIDP)
 CHECK_TYPE_SIZE("char *"    SIZEOF_CHARP)
@@ -492,8 +505,10 @@ ENDIF()
 
 IF(NOT CMAKE_CROSSCOMPILING AND NOT MSVC)
   STRING(TOLOWER ${CMAKE_SYSTEM_PROCESSOR}  processor)
-  IF(processor MATCHES "86" OR processor MATCHES "amd64" OR processor MATCHES "x64")
-    IF(NOT CMAKE_SYSTEM_NAME MATCHES "SunOS")
+  IF(processor MATCHES "86" OR
+      processor MATCHES "amd64" OR
+      processor MATCHES "x64")
+    IF(NOT SOLARIS)
       # The loader in some Solaris versions has a bug due to which it refuses to
       # start a binary that has been compiled by GCC and uses __asm__("pause")
       # with the error:
@@ -569,7 +584,7 @@ int main()
 }" HAVE_BUILTIN_EXPECT)
 
 # GCC has __builtin_stpcpy but still calls stpcpy
-IF(NOT CMAKE_SYSTEM_NAME MATCHES "SunOS" OR NOT CMAKE_COMPILER_IS_GNUCC)
+IF(NOT SOLARIS OR NOT CMAKE_COMPILER_IS_GNUCC)
 CHECK_C_SOURCE_COMPILES("
 int main()
 {

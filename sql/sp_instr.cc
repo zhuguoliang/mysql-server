@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2012, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -80,7 +80,7 @@ class Cmp_splocal_locations
                                   bool> {
  public:
   bool operator()(const Item_splocal *a, const Item_splocal *b) {
-    DBUG_ASSERT(a->pos_in_query != b->pos_in_query);
+    DBUG_ASSERT(a == b || a->pos_in_query != b->pos_in_query);
     return a->pos_in_query < b->pos_in_query;
   }
 };
@@ -270,10 +270,10 @@ static bool subst_spvars(THD *thd, sp_instr *instr, LEX_STRING *query_str) {
   return false;
 }
 
-  ///////////////////////////////////////////////////////////////////////////
-  // Sufficient max length of printed destinations and frame offsets (all
-  // uints).
-  ///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+// Sufficient max length of printed destinations and frame offsets (all
+// uints).
+///////////////////////////////////////////////////////////////////////////
 
 #define SP_INSTR_UINT_MAXLEN 8
 #define SP_STMT_PRINT_MAXLEN 40
@@ -409,7 +409,7 @@ bool sp_lex_instr::reset_lex_and_exec_core(THD *thd, uint *nextp,
         key read.
       */
 
-      m_lex->unit->cleanup(true);
+      m_lex->unit->cleanup(thd, true);
 
       /* Here we also commit or rollback the current statement. */
 
@@ -811,9 +811,9 @@ void sp_lex_instr::get_query(String *sql_query) const {
   sql_query->append(expr_query.str, expr_query.length);
 }
 
-  ///////////////////////////////////////////////////////////////////////////
-  // sp_instr_stmt implementation.
-  ///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+// sp_instr_stmt implementation.
+///////////////////////////////////////////////////////////////////////////
 
 #ifdef HAVE_PSI_INTERFACE
 PSI_statement_info sp_instr_stmt::psi_info = {0, "stmt", 0, PSI_DOCUMENT_ME};
@@ -923,7 +923,7 @@ bool sp_instr_stmt::execute(THD *thd, uint *nextp) {
   return rc || thd->is_error();
 }
 
-void sp_instr_stmt::print(String *str) {
+void sp_instr_stmt::print(const THD *, String *str) {
   /* stmt CMD "..." */
   if (str->reserve(SP_STMT_PRINT_MAXLEN + SP_INSTR_UINT_MAXLEN + 8)) return;
   qs_append(STRING_WITH_LEN("stmt"), str);
@@ -964,9 +964,9 @@ bool sp_instr_stmt::exec_core(THD *thd, uint *nextp) {
   return rc;
 }
 
-  ///////////////////////////////////////////////////////////////////////////
-  // sp_instr_set implementation.
-  ///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+// sp_instr_set implementation.
+///////////////////////////////////////////////////////////////////////////
 
 #ifdef HAVE_PSI_INTERFACE
 PSI_statement_info sp_instr_set::psi_info = {0, "set", 0, PSI_DOCUMENT_ME};
@@ -988,7 +988,7 @@ bool sp_instr_set::exec_core(THD *thd, uint *nextp) {
   return true;
 }
 
-void sp_instr_set::print(String *str) {
+void sp_instr_set::print(const THD *thd, String *str) {
   /* set name@offset ... */
   size_t rsrv = SP_INSTR_UINT_MAXLEN + 6;
   sp_variable *var = m_parsing_ctx->find_variable(m_offset);
@@ -1003,12 +1003,12 @@ void sp_instr_set::print(String *str) {
   }
   qs_append(m_offset, str);
   qs_append(' ', str);
-  m_value_item->print(str, QT_TO_ARGUMENT_CHARSET);
+  m_value_item->print(thd, str, QT_TO_ARGUMENT_CHARSET);
 }
 
-  ///////////////////////////////////////////////////////////////////////////
-  // sp_instr_set_trigger_field implementation.
-  ///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+// sp_instr_set_trigger_field implementation.
+///////////////////////////////////////////////////////////////////////////
 
 #ifdef HAVE_PSI_INTERFACE
 PSI_statement_info sp_instr_set_trigger_field::psi_info = {
@@ -1034,11 +1034,11 @@ bool sp_instr_set_trigger_field::exec_core(THD *thd, uint *nextp) {
   return error;
 }
 
-void sp_instr_set_trigger_field::print(String *str) {
+void sp_instr_set_trigger_field::print(const THD *thd, String *str) {
   str->append(STRING_WITH_LEN("set_trigger_field "));
-  m_trigger_field->print(str, QT_ORDINARY);
+  m_trigger_field->print(thd, str, QT_ORDINARY);
   str->append(STRING_WITH_LEN(":="));
-  m_value_item->print(str, QT_TO_ARGUMENT_CHARSET);
+  m_value_item->print(thd, str, QT_TO_ARGUMENT_CHARSET);
 }
 
 bool sp_instr_set_trigger_field::on_after_expr_parsing(THD *thd) {
@@ -1068,15 +1068,15 @@ void sp_instr_set_trigger_field::cleanup_before_parsing(THD *thd) {
   m_trigger_field = NULL;
 }
 
-  ///////////////////////////////////////////////////////////////////////////
-  // sp_instr_jump implementation.
-  ///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+// sp_instr_jump implementation.
+///////////////////////////////////////////////////////////////////////////
 
 #ifdef HAVE_PSI_INTERFACE
 PSI_statement_info sp_instr_jump::psi_info = {0, "jump", 0, PSI_DOCUMENT_ME};
 #endif
 
-void sp_instr_jump::print(String *str) {
+void sp_instr_jump::print(const THD *, String *str) {
   /* jump dest */
   if (str->reserve(SP_INSTR_UINT_MAXLEN + 5)) return;
   qs_append(STRING_WITH_LEN("jump "), str);
@@ -1114,9 +1114,9 @@ void sp_instr_jump::opt_move(uint dst, List<sp_branch_instr> *bp) {
   m_ip = dst;
 }
 
-  ///////////////////////////////////////////////////////////////////////////
-  // sp_instr_jump_if_not class implementation
-  ///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+// sp_instr_jump_if_not class implementation
+///////////////////////////////////////////////////////////////////////////
 
 #ifdef HAVE_PSI_INTERFACE
 PSI_statement_info sp_instr_jump_if_not::psi_info = {0, "jump_if_not", 0,
@@ -1135,7 +1135,7 @@ bool sp_instr_jump_if_not::exec_core(THD *thd, uint *nextp) {
   return false;
 }
 
-void sp_instr_jump_if_not::print(String *str) {
+void sp_instr_jump_if_not::print(const THD *thd, String *str) {
   /* jump_if_not dest(cont) ... */
   if (str->reserve(2 * SP_INSTR_UINT_MAXLEN + 14 +
                    32))  // Add some for the expr. too
@@ -1145,7 +1145,7 @@ void sp_instr_jump_if_not::print(String *str) {
   qs_append('(', str);
   qs_append(m_cont_dest, str);
   qs_append(STRING_WITH_LEN(") "), str);
-  m_expr_item->print(str, QT_ORDINARY);
+  m_expr_item->print(thd, str, QT_ORDINARY);
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -1196,9 +1196,9 @@ void sp_lex_branch_instr::opt_move(uint dst, List<sp_branch_instr> *bp) {
   m_ip = dst;
 }
 
-  ///////////////////////////////////////////////////////////////////////////
-  // sp_instr_jump_case_when implementation.
-  ///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+// sp_instr_jump_case_when implementation.
+///////////////////////////////////////////////////////////////////////////
 
 #ifdef HAVE_PSI_INTERFACE
 PSI_statement_info sp_instr_jump_case_when::psi_info = {0, "jump_case_when", 0,
@@ -1217,7 +1217,7 @@ bool sp_instr_jump_case_when::exec_core(THD *thd, uint *nextp) {
   return false;
 }
 
-void sp_instr_jump_case_when::print(String *str) {
+void sp_instr_jump_case_when::print(const THD *thd, String *str) {
   /* jump_if_not dest(cont) ... */
   if (str->reserve(2 * SP_INSTR_UINT_MAXLEN + 14 +
                    32))  // Add some for the expr. too
@@ -1227,7 +1227,7 @@ void sp_instr_jump_case_when::print(String *str) {
   qs_append('(', str);
   qs_append(m_cont_dest, str);
   qs_append(STRING_WITH_LEN(") "), str);
-  m_eq_item->print(str, QT_ORDINARY);
+  m_eq_item->print(thd, str, QT_ORDINARY);
 }
 
 bool sp_instr_jump_case_when::on_after_expr_parsing(THD *thd) {
@@ -1268,9 +1268,9 @@ bool sp_instr_jump_case_when::on_after_expr_parsing(THD *thd) {
   return false;
 }
 
-  ///////////////////////////////////////////////////////////////////////////
-  // sp_instr_freturn implementation.
-  ///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+// sp_instr_freturn implementation.
+///////////////////////////////////////////////////////////////////////////
 
 #ifdef HAVE_PSI_INTERFACE
 PSI_statement_info sp_instr_freturn::psi_info = {0, "freturn", 0,
@@ -1296,19 +1296,19 @@ bool sp_instr_freturn::exec_core(THD *thd, uint *nextp) {
   return thd->sp_runtime_ctx->set_return_value(thd, &m_expr_item);
 }
 
-void sp_instr_freturn::print(String *str) {
+void sp_instr_freturn::print(const THD *thd, String *str) {
   /* freturn type expr... */
   if (str->reserve(1024 + 8 + 32))  // Add some for the expr. too
     return;
   qs_append(STRING_WITH_LEN("freturn "), str);
   qs_append((uint)m_return_field_type, str);
   qs_append(' ', str);
-  m_expr_item->print(str, QT_ORDINARY);
+  m_expr_item->print(thd, str, QT_ORDINARY);
 }
 
-  ///////////////////////////////////////////////////////////////////////////
-  // sp_instr_hpush_jump implementation.
-  ///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+// sp_instr_hpush_jump implementation.
+///////////////////////////////////////////////////////////////////////////
 
 #ifdef HAVE_PSI_INTERFACE
 PSI_statement_info sp_instr_hpush_jump::psi_info = {0, "hpush_jump", 0,
@@ -1339,7 +1339,7 @@ bool sp_instr_hpush_jump::execute(THD *thd, uint *nextp) {
   return thd->sp_runtime_ctx->push_handler(m_handler, get_ip() + 1);
 }
 
-void sp_instr_hpush_jump::print(String *str) {
+void sp_instr_hpush_jump::print(const THD *, String *str) {
   /* hpush_jump dest fsize type */
   if (str->reserve(SP_INSTR_UINT_MAXLEN * 2 + 21)) return;
 
@@ -1381,9 +1381,9 @@ uint sp_instr_hpush_jump::opt_mark(sp_head *sp, List<sp_instr> *leads) {
   return get_ip() + 1;
 }
 
-  ///////////////////////////////////////////////////////////////////////////
-  // sp_instr_hpop implementation.
-  ///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+// sp_instr_hpop implementation.
+///////////////////////////////////////////////////////////////////////////
 
 #ifdef HAVE_PSI_INTERFACE
 PSI_statement_info sp_instr_hpop::psi_info = {0, "hpop", 0, PSI_DOCUMENT_ME};
@@ -1395,9 +1395,9 @@ bool sp_instr_hpop::execute(THD *thd, uint *nextp) {
   return false;
 }
 
-  ///////////////////////////////////////////////////////////////////////////
-  // sp_instr_hreturn implementation.
-  ///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+// sp_instr_hreturn implementation.
+///////////////////////////////////////////////////////////////////////////
 
 #ifdef HAVE_PSI_INTERFACE
 PSI_statement_info sp_instr_hreturn::psi_info = {0, "hreturn", 0,
@@ -1428,7 +1428,7 @@ bool sp_instr_hreturn::execute(THD *thd, uint *nextp) {
   return false;
 }
 
-void sp_instr_hreturn::print(String *str) {
+void sp_instr_hreturn::print(const THD *, String *str) {
   /* hreturn framesize dest */
   if (str->reserve(SP_INSTR_UINT_MAXLEN * 2 + 9)) return;
   qs_append(STRING_WITH_LEN("hreturn "), str);
@@ -1459,9 +1459,9 @@ uint sp_instr_hreturn::opt_mark(sp_head *, List<sp_instr> *) {
   return UINT_MAX;
 }
 
-  ///////////////////////////////////////////////////////////////////////////
-  // sp_instr_cpush implementation.
-  ///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+// sp_instr_cpush implementation.
+///////////////////////////////////////////////////////////////////////////
 
 #ifdef HAVE_PSI_INTERFACE
 PSI_statement_info sp_instr_cpush::psi_info = {0, "cpush", 0, PSI_DOCUMENT_ME};
@@ -1484,7 +1484,7 @@ bool sp_instr_cpush::exec_core(THD *thd, uint *) {
   return c ? c->open(thd) : true;
 }
 
-void sp_instr_cpush::print(String *str) {
+void sp_instr_cpush::print(const THD *, String *str) {
   const LEX_STRING *cursor_name = m_parsing_ctx->find_cursor(m_cursor_idx);
 
   size_t rsrv = SP_INSTR_UINT_MAXLEN + 7 + m_cursor_query.length + 1;
@@ -1502,9 +1502,9 @@ void sp_instr_cpush::print(String *str) {
   qs_append(m_cursor_query.str, m_cursor_query.length, str);
 }
 
-  ///////////////////////////////////////////////////////////////////////////
-  // sp_instr_cpop implementation.
-  ///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+// sp_instr_cpop implementation.
+///////////////////////////////////////////////////////////////////////////
 
 #ifdef HAVE_PSI_INTERFACE
 PSI_statement_info sp_instr_cpop::psi_info = {0, "cpop", 0, PSI_DOCUMENT_ME};
@@ -1517,16 +1517,16 @@ bool sp_instr_cpop::execute(THD *thd, uint *nextp) {
   return false;
 }
 
-void sp_instr_cpop::print(String *str) {
+void sp_instr_cpop::print(const THD *, String *str) {
   /* cpop count */
   if (str->reserve(SP_INSTR_UINT_MAXLEN + 5)) return;
   qs_append(STRING_WITH_LEN("cpop "), str);
   qs_append(m_count, str);
 }
 
-  ///////////////////////////////////////////////////////////////////////////
-  // sp_instr_copen implementation.
-  ///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+// sp_instr_copen implementation.
+///////////////////////////////////////////////////////////////////////////
 
 #ifdef HAVE_PSI_INTERFACE
 PSI_statement_info sp_instr_copen::psi_info = {0, "copen", 0, PSI_DOCUMENT_ME};
@@ -1573,7 +1573,7 @@ bool sp_instr_copen::execute(THD *thd, uint *nextp) {
   return rc;
 }
 
-void sp_instr_copen::print(String *str) {
+void sp_instr_copen::print(const THD *, String *str) {
   const LEX_STRING *cursor_name = m_parsing_ctx->find_cursor(m_cursor_idx);
 
   /* copen name@offset */
@@ -1589,9 +1589,9 @@ void sp_instr_copen::print(String *str) {
   qs_append(m_cursor_idx, str);
 }
 
-  ///////////////////////////////////////////////////////////////////////////
-  // sp_instr_cclose implementation.
-  ///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+// sp_instr_cclose implementation.
+///////////////////////////////////////////////////////////////////////////
 
 #ifdef HAVE_PSI_INTERFACE
 PSI_statement_info sp_instr_cclose::psi_info = {0, "cclose", 0,
@@ -1609,7 +1609,7 @@ bool sp_instr_cclose::execute(THD *thd, uint *nextp) {
   return c ? c->close() : true;
 }
 
-void sp_instr_cclose::print(String *str) {
+void sp_instr_cclose::print(const THD *, String *str) {
   const LEX_STRING *cursor_name = m_parsing_ctx->find_cursor(m_cursor_idx);
 
   /* cclose name@offset */
@@ -1625,9 +1625,9 @@ void sp_instr_cclose::print(String *str) {
   qs_append(m_cursor_idx, str);
 }
 
-  ///////////////////////////////////////////////////////////////////////////
-  // sp_instr_cfetch implementation.
-  ///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+// sp_instr_cfetch implementation.
+///////////////////////////////////////////////////////////////////////////
 
 #ifdef HAVE_PSI_INTERFACE
 PSI_statement_info sp_instr_cfetch::psi_info = {0, "cfetch", 0,
@@ -1645,7 +1645,7 @@ bool sp_instr_cfetch::execute(THD *thd, uint *nextp) {
   return c ? c->fetch(&m_varlist) : true;
 }
 
-void sp_instr_cfetch::print(String *str) {
+void sp_instr_cfetch::print(const THD *, String *str) {
   List_iterator_fast<sp_variable> li(m_varlist);
   sp_variable *pv;
   const LEX_STRING *cursor_name = m_parsing_ctx->find_cursor(m_cursor_idx);
@@ -1670,24 +1670,24 @@ void sp_instr_cfetch::print(String *str) {
   }
 }
 
-  ///////////////////////////////////////////////////////////////////////////
-  // sp_instr_error implementation.
-  ///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+// sp_instr_error implementation.
+///////////////////////////////////////////////////////////////////////////
 
 #ifdef HAVE_PSI_INTERFACE
 PSI_statement_info sp_instr_error::psi_info = {0, "error", 0, PSI_DOCUMENT_ME};
 #endif
 
-void sp_instr_error::print(String *str) {
+void sp_instr_error::print(const THD *, String *str) {
   /* error code */
   if (str->reserve(SP_INSTR_UINT_MAXLEN + 6)) return;
   qs_append(STRING_WITH_LEN("error "), str);
   qs_append(m_errcode, str);
 }
 
-  ///////////////////////////////////////////////////////////////////////////
-  // sp_instr_set_case_expr implementation.
-  ///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+// sp_instr_set_case_expr implementation.
+///////////////////////////////////////////////////////////////////////////
 
 #ifdef HAVE_PSI_INTERFACE
 PSI_statement_info sp_instr_set_case_expr::psi_info = {0, "set_case_expr", 0,
@@ -1717,7 +1717,7 @@ bool sp_instr_set_case_expr::exec_core(THD *thd, uint *nextp) {
   return false;
 }
 
-void sp_instr_set_case_expr::print(String *str) {
+void sp_instr_set_case_expr::print(const THD *thd, String *str) {
   /* set_case_expr (cont) id ... */
   str->reserve(2 * SP_INSTR_UINT_MAXLEN + 18 +
                32);  // Add some extra for expr too
@@ -1726,7 +1726,7 @@ void sp_instr_set_case_expr::print(String *str) {
   qs_append(STRING_WITH_LEN(") "), str);
   qs_append(m_case_expr_id, str);
   qs_append(' ', str);
-  m_expr_item->print(str, QT_ORDINARY);
+  m_expr_item->print(thd, str, QT_ORDINARY);
 }
 
 uint sp_instr_set_case_expr::opt_mark(sp_head *sp, List<sp_instr> *leads) {

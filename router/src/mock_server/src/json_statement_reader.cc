@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+  Copyright (c) 2017, 2019, Oracle and/or its affiliates. All rights reserved.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -35,6 +35,7 @@
 #include <rapidjson/filereadstream.h>
 #include <rapidjson/schema.h>
 #include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
 #include <cassert>
 #include <cerrno>
 #include <chrono>
@@ -152,7 +153,7 @@ struct QueriesJsonReader::Pimpl {
   static void validate_json_against_schema(const JsonSchemaDocument &schema,
                                            const JsonDocument &json);
 
-  std::unique_ptr<Response> read_result_info(const JsonValue &stmt);
+  std::unique_ptr<ResultsetResponse> read_result_info(const JsonValue &stmt);
   std::unique_ptr<Response> read_ok_info(const JsonValue &stmt);
   std::unique_ptr<Response> read_error_info(const JsonValue &stmt);
 };
@@ -163,7 +164,9 @@ QueriesJsonReader::QueriesJsonReader(const std::string &json_filename)
   // that invalid schema will slip by without throwing (but it will cause
   // validate_json_against_schema() to fail later on)
   JsonDocument schema_json;
-  if (schema_json.Parse<rapidjson::kParseCommentsFlag>(kSqlQueryJsonSchema)
+  if (schema_json
+          .Parse<rapidjson::kParseCommentsFlag>(SqlQueryJsonSchema::data(),
+                                                SqlQueryJsonSchema::size())
           .HasParseError())
     throw std::runtime_error(
         "Parsing JSON schema failed at offset " +
@@ -482,7 +485,42 @@ std::chrono::microseconds QueriesJsonReader::get_default_exec_time() {
   return std::chrono::microseconds(0);
 }
 
-std::unique_ptr<Response> QueriesJsonReader::Pimpl::read_result_info(
+std::vector<AsyncNotice> QueriesJsonReader::get_async_notices() {
+  std::vector<AsyncNotice> result;
+  if (!pimpl_->json_document_.HasMember("notices")) {
+    return result;
+  }
+
+  const JsonValue &notices = pimpl_->json_document_["notices"];
+  for (size_t i = 0; i < notices.Size(); ++i) {
+    auto &notice_json = notices[i];
+
+    AsyncNotice notice;
+    notice.send_offset_ms = std::chrono::milliseconds(
+        get_json_integer_field<unsigned>(notice_json, "send_offset"));
+    notice.type = get_json_integer_field<unsigned>(notice_json, "id");
+    const std::string scope = get_json_string_field(notice_json, "scope");
+    if (scope == "LOCAL") {
+      notice.is_local = true;
+    } else if (scope == "GLOBAL") {
+      notice.is_local = false;
+    } else {
+      throw std::runtime_error("scope must be LOCAL or GLOBAL wa: '" + scope +
+                               "'");
+    }
+
+    rapidjson::StringBuffer str_buff;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(str_buff);
+    notice_json["payload"].Accept(writer);
+    notice.payload = str_buff.GetString();
+
+    result.push_back(notice);
+  }
+
+  return result;
+}
+
+std::unique_ptr<ResultsetResponse> QueriesJsonReader::Pimpl::read_result_info(
     const JsonValue &stmt) {
   // only asserting as this should have been checked before if we got here
   assert(stmt.HasMember("result"));
@@ -553,11 +591,7 @@ std::unique_ptr<Response> QueriesJsonReader::Pimpl::read_result_info(
     }
   }
 
-#ifdef __SUNPRO_CC
-  return std::move(response);
-#else
   return response;
-#endif
 }
 
 std::unique_ptr<Response> QueriesJsonReader::Pimpl::read_ok_info(

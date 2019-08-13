@@ -1,4 +1,4 @@
-# Copyright (c) 2008, 2018, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2008, 2019, Oracle and/or its affiliates. All rights reserved.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
@@ -70,6 +70,7 @@ SET(NDBCLUSTER_SOURCES
   ../../sql/ndb_dd.cc
   ../../sql/ndb_modifiers.cc
   ../../sql/ndb_dd_client.cc
+  ../../sql/ndb_dd_schema.cc
   ../../sql/ndb_dd_table.cc
   ../../sql/ndb_dd_sdi.cc
   ../../sql/ndb_plugin_reference.cc
@@ -84,10 +85,22 @@ SET(NDBCLUSTER_SOURCES
   ../../sql/ndb_fk_util.cpp
   ../../sql/ndb_schema_trans_guard.cc
   ../../sql/ndb_create_helper.cc
+  ../../sql/ndb_apply_status_table.cc
+  ../../sql/ndb_metadata_change_monitor.cc
+  ../../sql/ndb_schema_result_table.cc
 )
 
 # Include directories used when building ha_ndbcluster
 INCLUDE_DIRECTORIES(${CMAKE_SOURCE_DIR}/storage/ndb/include)
+
+IF(SOLARIS_INTEL)
+  # Sun Studio 12.6 on x86 machines creates a bogus code
+  # when -xO2 is used and crashes the executable whenever
+  # it calls std::condition_variable::wait_for()
+  STRING_APPEND(CMAKE_CXX_FLAGS_RELWITHDEBINFO " -xO1")
+  STRING_APPEND(CMAKE_CXX_FLAGS_RELEASE " -xO1")
+  STRING_APPEND(CMAKE_CXX_FLAGS_MINSIZEREL " -xO1")
+ENDIF()
 
 IF(NOT WITHOUT_SERVER)
   MYSQL_ADD_PLUGIN(ndbcluster ${NDBCLUSTER_SOURCES} STORAGE_ENGINE
@@ -158,6 +171,13 @@ ELSE()
     MESSAGE(STATUS "Building NDB test programs for \"-devbld\" debug build")
     SET(WITH_NDB_TEST ON)
     MESSAGE(STATUS "Building NdbApi examples for \"-devbld\" debug build")
+    SET(WITH_NDBAPI_EXAMPLES ON)
+  ENDIF()
+  # Turn on build of NDB tests automatically for "-werror" builds
+  IF(PACKAGE_SUFFIX STREQUAL "-werror")
+    MESSAGE(STATUS "Building NDB test programs for \"-werror\" build")
+    SET(WITH_NDB_TEST ON)
+    MESSAGE(STATUS "Building NdbApi examples for \"-werror\" build")
     SET(WITH_NDBAPI_EXAMPLES ON)
   ENDIF()
 ENDIF()
@@ -244,7 +264,7 @@ ELSEIF(WITH_NDB_JAVA)
     MESSAGE(STATUS "Looking for Java in standard locations")
   ENDIF()
 
-  FIND_PACKAGE(Java 1.6 COMPONENTS Development)
+  FIND_PACKAGE(Java 1.8 COMPONENTS Development)
   IF(NOT JAVA_FOUND)
     IF(DEFINED ENV{JAVA_HOME})
       # Could not find Java in the specific location set by JAVA_HOME
@@ -271,10 +291,7 @@ ELSEIF(WITH_NDB_JAVA)
     ENDIF()
 
     # Search for version in specified order
-    SET(_preferred_versions
-       1.8
-       1.7
-       1.6)
+    SET(_preferred_versions 1.8)
 
     FOREACH(_version ${_preferred_versions})
       SET(_path ${_base_path}jdk${_version}${_bit_suffix})

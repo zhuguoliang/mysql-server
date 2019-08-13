@@ -1,4 +1,4 @@
-/* Copyright (c) 2005, 2018, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2005, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -49,7 +49,7 @@
 #include <string.h>
 #include <algorithm>
 
-#include "binary_log_types.h"
+#include "field_types.h"  // enum_field_types
 #include "m_string.h"
 #include "my_bitmap.h"
 #include "my_byteorder.h"
@@ -98,7 +98,6 @@
 #include "sql/system_variables.h"
 #include "sql/table.h"
 #include "sql/thd_raii.h"
-#include "sql/thr_malloc.h"
 #include "sql_string.h"
 
 struct MEM_ROOT;
@@ -109,14 +108,14 @@ using std::min;
 /*
   Partition related functions declarations and some static constants;
 */
-const LEX_STRING partition_keywords[] = {{C_STRING_WITH_LEN("HASH")},
-                                         {C_STRING_WITH_LEN("RANGE")},
-                                         {C_STRING_WITH_LEN("LIST")},
-                                         {C_STRING_WITH_LEN("KEY")},
-                                         {C_STRING_WITH_LEN("MAXVALUE")},
-                                         {C_STRING_WITH_LEN("LINEAR ")},
-                                         {C_STRING_WITH_LEN(" COLUMNS")},
-                                         {C_STRING_WITH_LEN("ALGORITHM")}
+const LEX_CSTRING partition_keywords[] = {{STRING_WITH_LEN("HASH")},
+                                          {STRING_WITH_LEN("RANGE")},
+                                          {STRING_WITH_LEN("LIST")},
+                                          {STRING_WITH_LEN("KEY")},
+                                          {STRING_WITH_LEN("MAXVALUE")},
+                                          {STRING_WITH_LEN("LINEAR ")},
+                                          {STRING_WITH_LEN(" COLUMNS")},
+                                          {STRING_WITH_LEN("ALGORITHM")}
 
 };
 static const char *part_str = "PARTITION";
@@ -311,7 +310,7 @@ static bool partition_default_handling(TABLE *table, partition_info *part_info,
 */
 
 int get_parts_for_update(const uchar *old_data,
-                         uchar *new_data MY_ATTRIBUTE((unused)),
+                         const uchar *new_data MY_ATTRIBUTE((unused)),
                          const uchar *rec0, partition_info *part_info,
                          uint32 *old_part_id, uint32 *new_part_id,
                          longlong *new_func_value) {
@@ -441,11 +440,11 @@ static bool set_up_field_array(TABLE *table, bool is_sub_part) {
     if (field->flags & GET_FIXED_FIELDS_FLAG) num_fields++;
   }
   if (num_fields > MAX_REF_PARTS) {
-    char *err_str;
+    const char *err_str;
     if (is_sub_part)
-      err_str = (char *)"subpartition function";
+      err_str = "subpartition function";
     else
-      err_str = (char *)"partition function";
+      err_str = "partition function";
     my_error(ER_TOO_MANY_PARTITION_FUNC_FIELDS_ERROR, MYF(0), err_str);
     DBUG_RETURN(true);
   }
@@ -843,9 +842,8 @@ static bool init_lex_with_single_table(THD *thd, TABLE *table, LEX *lex) {
     we're working with to the Name_resolution_context.
   */
   thd->lex = lex;
-  auto table_ident = new (*THR_MALLOC)
-      Table_ident(thd->get_protocol(), to_lex_cstring(table->s->table_name),
-                  to_lex_cstring(table->s->db), true);
+  auto table_ident = new (thd->mem_root) Table_ident(
+      thd->get_protocol(), table->s->db, table->s->table_name, true);
   if (table_ident == nullptr) return true;
 
   TABLE_LIST *table_list =
@@ -934,7 +932,7 @@ static bool fix_fields_part_func(THD *thd, Item *func_expr, TABLE *table,
 
   if (init_lex_with_single_table(thd, table, &lex)) goto end;
 
-  func_expr->walk(&Item::change_context_processor, Item::WALK_POSTFIX,
+  func_expr->walk(&Item::change_context_processor, enum_walk::POSTFIX,
                   (uchar *)&lex.select_lex->context);
   thd->where = "partition function";
   /*
@@ -983,7 +981,7 @@ static bool fix_fields_part_func(THD *thd, Item *func_expr, TABLE *table,
     in future so that we always throw an error.
   */
   if (func_expr->walk(&Item::check_valid_arguments_processor,
-                      Item::WALK_POSTFIX, NULL)) {
+                      enum_walk::POSTFIX, NULL)) {
     if (is_create_table_ind) {
       my_error(ER_WRONG_EXPR_IN_PARTITION_FUNC_ERROR, MYF(0));
       goto end;
@@ -998,7 +996,7 @@ static bool fix_fields_part_func(THD *thd, Item *func_expr, TABLE *table,
 end:
   end_lex_with_single_table(thd, table, old_lex);
 #if !defined(DBUG_OFF)
-  func_expr->walk(&Item::change_context_processor, Item::WALK_POSTFIX, NULL);
+  func_expr->walk(&Item::change_context_processor, enum_walk::POSTFIX, NULL);
 #endif
   DBUG_RETURN(result);
 }
@@ -1760,8 +1758,7 @@ static int add_part_field_list(File fptr, List<char> field_list) {
 
 static int add_ident_string(File fptr, const char *name) {
   String name_string("", 0, system_charset_info);
-  THD *thd = current_thd;
-  append_identifier(thd, &name_string, name, strlen(name));
+  append_identifier(current_thd, &name_string, name, strlen(name));
   return add_string_object(fptr, &name_string);
 }
 
@@ -2254,7 +2251,7 @@ static char *get_file_content(File fptr, uint *buf_length, bool use_sql_alloc) {
     return NULL;
   *buf_length = (uint)buffer_length;
   if (use_sql_alloc)
-    buf = (char *)sql_alloc(*buf_length + 1);
+    buf = (char *)(*THR_MALLOC)->Alloc(*buf_length + 1);
   else
     buf = (char *)my_malloc(key_memory_partition_syntax_buffer, *buf_length + 1,
                             MYF(MY_WME));
@@ -2357,7 +2354,8 @@ char *generate_partition_syntax(partition_info *part_info, uint *buf_length,
       // No point in including schema and table name for identifiers
       // since any columns must be in this table.
       part_info->part_expr->print(
-          &tmp, enum_query_type(QT_TO_SYSTEM_CHARSET | QT_NO_DB | QT_NO_TABLE));
+          current_thd, &tmp,
+          enum_query_type(QT_TO_SYSTEM_CHARSET | QT_NO_DB | QT_NO_TABLE));
       err += add_string_len(fptr, tmp.ptr(), tmp.length());
     } else {
       err += add_string_len(fptr, part_info->part_func_string,
@@ -2396,7 +2394,7 @@ char *generate_partition_syntax(partition_info *part_info, uint *buf_length,
         // No point in including schema and table name for identifiers
         // since any columns must be in this table.
         part_info->subpart_expr->print(
-            &tmp,
+            current_thd, &tmp,
             enum_query_type(QT_TO_SYSTEM_CHARSET | QT_NO_DB | QT_NO_TABLE));
         err += add_string_len(fptr, tmp.ptr(), tmp.length());
       } else {
@@ -3448,7 +3446,7 @@ static int get_sub_part_id_from_key(const TABLE *table, uchar *buf,
   int res;
   DBUG_ENTER("get_sub_part_id_from_key");
 
-  key_restore(buf, (uchar *)key_spec->key, key_info, key_spec->length);
+  key_restore(buf, key_spec->key, key_info, key_spec->length);
   if (likely(rec0 == buf)) {
     res = part_info->get_subpartition_id(part_info, part_id);
   } else {
@@ -3489,7 +3487,7 @@ static bool get_part_id_from_key(const TABLE *table, uchar *buf, KEY *key_info,
   longlong func_value;
   DBUG_ENTER("get_part_id_from_key");
 
-  key_restore(buf, (uchar *)key_spec->key, key_info, key_spec->length);
+  key_restore(buf, key_spec->key, key_info, key_spec->length);
   if (likely(rec0 == buf)) {
     result = part_info->get_part_partition_id(part_info, part_id, &func_value);
   } else {
@@ -3531,7 +3529,7 @@ void get_full_part_id_from_key(const TABLE *table, uchar *buf, KEY *key_info,
   longlong func_value;
   DBUG_ENTER("get_full_part_id_from_key");
 
-  key_restore(buf, (uchar *)key_spec->key, key_info, key_spec->length);
+  key_restore(buf, key_spec->key, key_info, key_spec->length);
   if (likely(rec0 == buf)) {
     result = part_info->get_partition_id(part_info, &part_spec->start_part,
                                          &func_value);
@@ -5223,7 +5221,7 @@ err:
 
 static void set_field_ptr(Field **ptr, const uchar *new_buf,
                           const uchar *old_buf) {
-  my_ptrdiff_t diff = (new_buf - old_buf);
+  ptrdiff_t diff = (new_buf - old_buf);
   DBUG_ENTER("set_field_ptr");
 
   do {

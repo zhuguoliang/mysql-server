@@ -1,4 +1,4 @@
-/* Copyright (c) 2011, 2018, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2011, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -234,13 +234,13 @@ struct Slave_job_group {
   void reset(my_off_t master_pos, ulonglong seqno) {
     master_log_pos = master_pos;
     group_master_log_pos = group_relay_log_pos = 0;
-    group_master_log_name = NULL;  // todo: remove
-    group_relay_log_name = NULL;
+    group_master_log_name = nullptr;  // todo: remove
+    group_relay_log_name = nullptr;
     worker_id = MTS_WORKER_UNDEF;
     total_seqno = seqno;
-    checkpoint_log_name = NULL;
+    checkpoint_log_name = nullptr;
     checkpoint_log_pos = 0;
-    checkpoint_relay_log_name = NULL;
+    checkpoint_relay_log_name = nullptr;
     checkpoint_relay_log_pos = 0;
     checkpoint_seqno = (uint)-1;
     done = 0;
@@ -250,7 +250,7 @@ struct Slave_job_group {
 #endif
     last_committed = SEQ_UNINIT;
     sequence_number = SEQ_UNINIT;
-    new_fd_event = NULL;
+    new_fd_event = nullptr;
   }
 };
 
@@ -514,9 +514,8 @@ class Slave_jobs_queue : public circular_buffer_queue<Slave_job_item> {
 
 class Slave_worker : public Relay_log_info {
  public:
-  Slave_worker(Relay_log_info *rli
+  Slave_worker(Relay_log_info *rli,
 #ifdef HAVE_PSI_INTERFACE
-               ,
                PSI_mutex_key *param_key_info_run_lock,
                PSI_mutex_key *param_key_info_data_lock,
                PSI_mutex_key *param_key_info_sleep_lock,
@@ -524,9 +523,8 @@ class Slave_worker : public Relay_log_info {
                PSI_mutex_key *param_key_info_data_cond,
                PSI_mutex_key *param_key_info_start_cond,
                PSI_mutex_key *param_key_info_stop_cond,
-               PSI_mutex_key *param_key_info_sleep_cond
+               PSI_mutex_key *param_key_info_sleep_cond,
 #endif
-               ,
                uint param_id, const char *param_channel);
 
   virtual ~Slave_worker();

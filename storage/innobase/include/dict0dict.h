@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2018, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 1996, 2019, Oracle and/or its affiliates. All Rights Reserved.
 Copyright (c) 2012, Facebook Inc.
 
 This program is free software; you can redistribute it and/or modify it under
@@ -98,9 +98,8 @@ ulint dict_table_get_highest_foreign_id(
 #endif                    /* !UNIV_HOTBACKUP */
 /** Return the end of table name where we have removed dbname and '/'.
  @return table name */
-const char *dict_remove_db_name(
-    const char *name) /*!< in: table name in the form
-                      dbname '/' tablename */
+const char *dict_remove_db_name(const char *name) /*!< in: table name in the
+                                                  form dbname '/' tablename */
     MY_ATTRIBUTE((warn_unused_result));
 
 /** Operation to perform when opening a table */
@@ -605,7 +604,7 @@ bool dict_table_has_atomic_blobs(const dict_table_t *table)
 @param[in]	use_data_dir	Table uses DATA DIRECTORY
 @param[in]	shared_space	Table uses a General Shared Tablespace */
 UNIV_INLINE
-void dict_tf_set(ulint *flags, rec_format_t format, ulint zip_ssize,
+void dict_tf_set(uint32_t *flags, rec_format_t format, ulint zip_ssize,
                  bool use_data_dir, bool shared_space);
 
 /** Initialize a dict_table_t::flags pointer.
@@ -615,8 +614,8 @@ void dict_tf_set(ulint *flags, rec_format_t format, ulint zip_ssize,
 @param[in]	data_dir	Table uses DATA DIRECTORY
 @param[in]	shared_space	Table uses a General Shared Tablespace */
 UNIV_INLINE
-ulint dict_tf_init(bool compact, ulint zip_ssize, bool atomic_blobs,
-                   bool data_dir, bool shared_space);
+uint32_t dict_tf_init(bool compact, ulint zip_ssize, bool atomic_blobs,
+                      bool data_dir, bool shared_space);
 
 /** Convert a 32 bit integer table flags to the 32 bit FSP Flags.
 Fsp Flags are written into the tablespace header at the offset
@@ -630,13 +629,13 @@ fil_space_t::flags  |     0     |    0    |     1      |    1
 ==================================================================
 @param[in]	table_flags	dict_table_t::flags
 @return tablespace flags (fil_space_t::flags) */
-ulint dict_tf_to_fsp_flags(ulint table_flags) MY_ATTRIBUTE((const));
+uint32_t dict_tf_to_fsp_flags(uint32_t table_flags) MY_ATTRIBUTE((const));
 
 /** Extract the page size from table flags.
 @param[in]	flags	flags
 @return compressed page size, or 0 if not compressed */
 UNIV_INLINE
-const page_size_t dict_tf_get_page_size(ulint flags) MY_ATTRIBUTE((const));
+const page_size_t dict_tf_get_page_size(uint32_t flags) MY_ATTRIBUTE((const));
 #endif /* !UNIV_HOTBACKUP */
 
 /** Determine the extent size (in pages) for the given table
@@ -869,16 +868,15 @@ inline bool dict_table_is_compressed_temporary(const dict_table_t *table);
 #endif /* UNIV_DEBUG */
 /** Builds a node pointer out of a physical record and a page number.
  @return own: node pointer */
-dtuple_t *dict_index_build_node_ptr(
-    const dict_index_t *index, /*!< in: index */
-    const rec_t *rec,          /*!< in: record for which to build node
-                               pointer */
-    page_no_t page_no,         /*!< in: page number to put in node
-                               pointer */
-    mem_heap_t *heap,          /*!< in: memory heap where pointer
-                               created */
-    ulint level)               /*!< in: level of rec in tree:
-                               0 means leaf level */
+dtuple_t *dict_index_build_node_ptr(const dict_index_t *index, /*!< in: index */
+                                    const rec_t *rec,  /*!< in: record for which
+                                                       to build node  pointer */
+                                    page_no_t page_no, /*!< in: page number to
+                                                       put in node pointer */
+                                    mem_heap_t *heap, /*!< in: memory heap where
+                                                      pointer created */
+                                    ulint level) /*!< in: level of rec in tree:
+                                                 0 means leaf level */
     MY_ATTRIBUTE((warn_unused_result));
 /** Copies an initial segment of a physical record, long enough to specify an
  index entry uniquely.
@@ -989,11 +987,10 @@ void dict_table_stats_unlock(dict_table_t *table, ulint latch_mode);
 
 /** Checks if the database name in two table names is the same.
  @return true if same db name */
-ibool dict_tables_have_same_db(
-    const char *name1, /*!< in: table name in the form
-                       dbname '/' tablename */
-    const char *name2) /*!< in: table name in the form
-                       dbname '/' tablename */
+ibool dict_tables_have_same_db(const char *name1, /*!< in: table name in the
+                                                  form dbname '/' tablename */
+                               const char *name2) /*!< in: table name in the
+                                                  form dbname '/' tablename */
     MY_ATTRIBUTE((warn_unused_result));
 /** Get an index by name.
 @param[in]	table		the table where to look for the index
@@ -1485,7 +1482,7 @@ void dict_set_merge_threshold_all_debug(uint merge_threshold_all);
 @param[in]	flags	Table flags
 @return true if valid. */
 UNIV_INLINE
-bool dict_tf_is_valid(ulint flags);
+bool dict_tf_is_valid(uint32_t flags);
 
 /** Validate both table flags and table flags2 and make sure they
 are compatible.
@@ -1493,7 +1490,7 @@ are compatible.
 @param[in]	flags2	Table flags2
 @return true if valid. */
 UNIV_INLINE
-bool dict_tf2_is_valid(ulint flags, ulint flags2);
+bool dict_tf2_is_valid(uint32_t flags, uint32_t flags2);
 
 /** Check if the tablespace for the table has been discarded.
  @return true if the tablespace has been discarded. */
@@ -1597,7 +1594,8 @@ ulint dict_table_encode_n_col(ulint n_col, ulint n_v_col);
 @param[in,out]	n_col	number of non-virtual column
 @param[in,out]	n_v_col	number of virtual column */
 UNIV_INLINE
-void dict_table_decode_n_col(ulint encoded, ulint *n_col, ulint *n_v_col);
+void dict_table_decode_n_col(uint32_t encoded, uint32_t *n_col,
+                             uint32_t *n_v_col);
 
 /** Free the virtual column template
 @param[in,out]	vc_templ	virtual column template */

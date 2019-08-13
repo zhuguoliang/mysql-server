@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2019, Oracle and/or its affiliates. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
@@ -28,6 +28,7 @@
 #ifndef PLUGIN_X_CLIENT_XSESSION_IMPL_H_
 #define PLUGIN_X_CLIENT_XSESSION_IMPL_H_
 
+#include <chrono>
 #include <map>
 #include <memory>
 #include <set>
@@ -84,6 +85,8 @@ class Session_impl : public XSession {
                         const char *value) override;
   XError set_capability(const Mysqlx_capability capability,
                         const int64_t value) override;
+  XError set_capability(const Mysqlx_capability capability,
+                        const Argument_object &value) override;
 
   XError connect(const char *host, const uint16_t port, const char *user,
                  const char *pass, const char *schema) override;
@@ -103,6 +106,8 @@ class Session_impl : public XSession {
                                               XError *out_error) override;
 
   void close() override;
+
+  Argument_object get_connect_attrs() const override;
 
  private:
   using Context_ptr = std::shared_ptr<Context>;
@@ -142,6 +147,17 @@ class Session_impl : public XSession {
   std::vector<Auth> m_use_auth_methods;
   std::set<Auth> m_server_supported_auth_methods{Auth::Mysql41, Auth::Plain,
                                                  Auth::Sha256_memory};
+
+  class Session_connect_timeout_scope_guard {
+   public:
+    Session_connect_timeout_scope_guard(Session_impl *parent);
+    ~Session_connect_timeout_scope_guard();
+
+   private:
+    Session_impl *m_parent;
+    XProtocol::Handler_id m_handler_id;
+    std::chrono::steady_clock::time_point m_start_time;
+  };
 };
 
 }  // namespace xcl

@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2014, 2018, Oracle and/or its affiliates. All rights reserved.
+   Copyright (c) 2014, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -25,8 +25,13 @@
 #ifndef NDB_BINLOG_THREAD_H
 #define NDB_BINLOG_THREAD_H
 
+#include <string>
+#include <vector>
+#include <mutex>
 #include "sql/ndb_component.h"
 #include "sql/ndb_binlog_hooks.h"
+
+class Ndb;
 
 class Ndb_binlog_thread : public Ndb_component
 {
@@ -35,6 +40,17 @@ class Ndb_binlog_thread : public Ndb_component
 public:
   Ndb_binlog_thread();
   virtual ~Ndb_binlog_thread();
+
+  /*
+    @brief Check if purge of the specified binlog file can be handled
+    by the binlog thread.
+
+    @param filename Name of the binlog file which has been purged
+
+    @return true the binlog thread will handle the purge
+    @return false the binlog thread will not handle the purge
+  */
+  bool handle_purge(const char *filename);
 private:
   virtual int do_init();
   virtual void do_run();
@@ -50,15 +66,43 @@ private:
      notice that the recording is most likely not continuous.
   */
   enum Reconnect_type {
-    // Incident occured because the mysqld was stopped and
+    // Incident occurred because the mysqld was stopped and
     // is now starting up again
     MYSQLD_STARTUP,
-    // Incident occured because the mysqld was disconnected
+    // Incident occurred because the mysqld was disconnected
     // from the cluster
     CLUSTER_DISCONNECT
   };
   bool check_reconnect_incident(THD* thd, class injector* inj,
                                 Reconnect_type incident_id) const;
+
+  /**
+    @brief Perform any purge requests which has been queued up earlier.
+
+    @param thd Thread handle
+  */
+  void recall_pending_purges(THD *thd);
+  std::mutex m_purge_mutex; // Protects m_pending_purges
+  std::vector<std::string> m_pending_purges; // List of pending purges
+
+  /**
+     @brief Remove event operations belonging to one Ndb object
+
+     @param ndb The Ndb object to remove event operations from
+  */
+  void remove_event_operations(Ndb *ndb) const;
+
+  /**
+     @brief Remove event operations belonging to the two different Ndb objects
+     owned by the binlog thread
+
+     @note The function also release references to NDB_SHARE's owned by the
+     binlog thread
+
+     @param s_ndb The schema Ndb object to remove event operations from
+     @param i_ndb The injector Ndb object to remove event operations from
+  */
+  void remove_all_event_operations(Ndb *s_ndb, Ndb *i_ndb) const;
 
 };
 

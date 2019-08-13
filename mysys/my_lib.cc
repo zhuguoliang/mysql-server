@@ -1,4 +1,4 @@
-/* Copyright (c) 2000, 2017, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2000, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -96,7 +96,7 @@ MY_DIR *my_dir(const char *path, myf MyFlags) {
   DBUG_ENTER("my_dir");
   DBUG_PRINT("my", ("path: '%s' MyFlags: %d", path, MyFlags));
 
-  dirp = opendir(directory_file_name(tmp_path, (char *)path));
+  dirp = opendir(directory_file_name(tmp_path, path));
   if (dirp == NULL ||
       !(buffer = static_cast<char *>(
             my_malloc(key_memory_MY_DIR,
@@ -122,8 +122,7 @@ MY_DIR *my_dir(const char *path, myf MyFlags) {
     if (!(finfo.name = strdup_root(names_storage, dp->d_name))) goto error;
 
     if (MyFlags & MY_WANT_STAT) {
-      if (!(finfo.mystat =
-                (MY_STAT *)alloc_root(names_storage, sizeof(MY_STAT))))
+      if (!(finfo.mystat = (MY_STAT *)names_storage->Alloc(sizeof(MY_STAT))))
         goto error;
 
       memset(finfo.mystat, 0, sizeof(MY_STAT));
@@ -172,7 +171,7 @@ static char *directory_file_name(char *dst, const char *src) {
   char *end;
   DBUG_ASSERT(strlen(src) < (FN_REFLEN + 1));
 
-  if (src[0] == 0) src = (char *)"."; /* Use empty as current */
+  if (src[0] == 0) src = "."; /* Use empty as current */
   end = my_stpnmov(dst, src, FN_REFLEN + 1);
   if (end[-1] != FN_LIBCHAR) {
     end[0] = FN_LIBCHAR; /* Add last '/' */
@@ -252,8 +251,7 @@ MY_DIR *my_dir(const char *path, myf MyFlags) {
       if (attrib & (_A_HIDDEN | _A_SYSTEM)) continue;
       if (!(finfo.name = strdup_root(names_storage, find.name))) goto error;
       if (MyFlags & MY_WANT_STAT) {
-        if (!(finfo.mystat =
-                  (MY_STAT *)alloc_root(names_storage, sizeof(MY_STAT))))
+        if (!(finfo.mystat = (MY_STAT *)names_storage->Alloc(sizeof(MY_STAT))))
           goto error;
 
         memset(finfo.mystat, 0, sizeof(MY_STAT));

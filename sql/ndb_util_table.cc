@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2018, Oracle and/or its affiliates. All rights reserved.
+   Copyright (c) 2018, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -25,14 +25,37 @@
 // Implements the interface defined in
 #include "sql/ndb_util_table.h"
 
+#include "my_base.h"
+#include "my_byteorder.h" // uint2korr
+#include "mysql_version.h"
 #include "sql/ndb_thd_ndb.h"
+#include "ndbapi/NdbRecAttr.hpp" // NdbRecAttr
+
+class Db_name_guard {
+  Ndb * const m_ndb;
+  const std::string m_save_old_dbname;
+  Db_name_guard() = delete;
+  Db_name_guard(const Db_name_guard &) = delete;
+
+ public:
+  Db_name_guard(Ndb *ndb, const std::string dbname)
+      : m_ndb(ndb), m_save_old_dbname(ndb->getDatabaseName()) {
+    m_ndb->setDatabaseName(dbname.c_str());
+  }
+
+  ~Db_name_guard() {
+    // Restore old dbname
+    m_ndb->setDatabaseName(m_save_old_dbname.c_str());
+  }
+};
 
 Ndb_util_table::Ndb_util_table(Thd_ndb* thd_ndb, const char* db_name,
-                               const char* table_name)
+                               const char* table_name, bool hidden)
     : m_thd_ndb(thd_ndb),
       m_table_guard(thd_ndb->ndb->getDictionary()),
       m_db_name(db_name),
-      m_table_name(table_name) {}
+      m_table_name(table_name),
+      m_hidden(hidden) {}
 
 Ndb_util_table::~Ndb_util_table() {}
 
@@ -48,25 +71,36 @@ void Ndb_util_table::push_warning(const char* fmt, ...) const {
                           message);
 }
 
-bool Ndb_util_table::open() {
-  Ndb* ndb = m_thd_ndb->ndb;
-  std::string save_db_name(ndb->getDatabaseName());
+void Ndb_util_table::push_ndb_error_warning(const NdbError &ndb_err) const {
+  push_warning("NDB error: %d %s", ndb_err.code, ndb_err.message);
+}
 
-  // Set correct database name on the Ndb object, it's used when opening
-  // the table defintion from NDB dictionary
-  if (ndb->setDatabaseName(m_db_name.c_str()) != 0) {
-    push_warning("Failed to set databasename for Ndb object");
+bool Ndb_util_table::exists() const {
+  Ndb *ndb = m_thd_ndb->ndb;
+
+  // Set correct database name on the Ndb object
+  Db_name_guard db_guard(ndb, m_db_name.c_str());
+
+  // Load up the table definition from NDB dictionary
+  Ndb_table_guard ndb_tab(ndb->getDictionary(), m_table_name.c_str());
+
+  if (ndb_tab.get_table() == nullptr) {
+    // Table does not exist in NDB
     return false;
   }
+
+  // Table exists in NDB
+  return true;
+}
+
+bool Ndb_util_table::open() {
+  Ndb* ndb = m_thd_ndb->ndb;
+
+  // Set correct database name on the Ndb object
+  Db_name_guard db_guard(ndb, m_db_name.c_str());
 
   // Load up the table definition from NDB dictionary
   m_table_guard.init(m_table_name.c_str());
-
-  // Restore the database name of the Ndb object
-  if (ndb->setDatabaseName(save_db_name.c_str()) != 0) {
-    push_warning("Failed to restore databasename for Ndb object");
-    return false;
-  }
 
   const NdbDictionary::Table* tab = m_table_guard.get_table();
   if (!tab) {
@@ -115,6 +149,11 @@ bool Ndb_util_table::check_primary_key(
   return true;
 }
 
+int Ndb_util_table::get_column_max_length(const char* name) const
+{
+  return get_column(name)->getLength();
+}
+
 bool Ndb_util_table::check_column_type(const NdbDictionary::Column* col,
                                        NdbDictionary::Column::Type type,
                                        const char* type_name) const {
@@ -159,4 +198,150 @@ bool Ndb_util_table::check_column_bigunsigned(const char* name) const {
 bool Ndb_util_table::check_column_blob(const char* name) const {
   return check_column_type(get_column(name), NdbDictionary::Column::Blob,
                            "BLOB");
+}
+
+bool Ndb_util_table::check_column_nullable(const char* name, bool nullable) const {
+  if (get_column(name)->getNullable() != nullable) {
+    push_warning("Column '%s' must be defined to %sallow NULL values", name,
+                 nullable ? "" : "not ");
+    return false;
+  }
+  return true;
+}
+
+bool Ndb_util_table::define_table_add_column(
+    NdbDictionary::Table &new_table,
+    const NdbDictionary::Column &new_column) const {
+  if (new_table.addColumn(new_column) != 0) {
+    push_warning("Failed to add column '%s'", new_column.getName());
+    return false;
+  }
+  return true;
+}
+
+bool Ndb_util_table::create_table_in_NDB(
+    const NdbDictionary::Table &new_table) const {
+  // Set correct database name on the Ndb object
+  Db_name_guard db_guard(m_thd_ndb->ndb, m_db_name.c_str());
+
+  NdbDictionary::Dictionary *dict = m_thd_ndb->ndb->getDictionary();
+  if (dict->createTable(new_table) != 0) {
+    push_ndb_error_warning(dict->getNdbError());;
+    push_warning("Failed to create table '%s'", new_table.getName());
+    return false;
+  }
+  return true;
+}
+
+bool Ndb_util_table::drop_table_in_NDB(
+    const NdbDictionary::Table &old_table) const {
+  // Set correct database name on the Ndb object
+  Db_name_guard db_guard(m_thd_ndb->ndb, m_db_name.c_str());
+  NdbDictionary::Dictionary *dict = m_thd_ndb->ndb->getDictionary();
+
+  if (!drop_events_in_NDB())
+  {
+    push_warning("Failed to drop events for table '%s'",
+                 m_table_name.c_str());
+    return false;
+  }
+
+  if (dict->dropTableGlobal(old_table) != 0) {
+    push_ndb_error_warning(dict->getNdbError());
+    push_warning("Failed to drop table '%s'", old_table.getName());
+    return false;
+  }
+
+  return true;
+}
+
+bool Ndb_util_table::drop_event_in_NDB(const char *event_name) const {
+  NdbDictionary::Dictionary *dict = m_thd_ndb->ndb->getDictionary();
+  if (dict->dropEvent(event_name) != 0) {
+    if (dict->getNdbError().code == 4710 || dict->getNdbError().code == 1419) {
+      // Failed to drop event but return code says it was
+      // because the event didn't exist -> all ok
+      return true;
+    }
+    push_ndb_error_warning(dict->getNdbError());
+    push_warning("Failed to drop event '%s'", event_name);
+    return false;
+  }
+  return true;
+}
+
+bool Ndb_util_table::create() const {
+  NdbDictionary::Table new_table(m_table_name.c_str());
+
+  unsigned mysql_version = MYSQL_VERSION_ID;
+#ifndef DBUG_OFF
+  if (m_table_name == "ndb_schema" &&
+      DBUG_EVALUATE_IF("ndb_schema_skip_create_schema_op_id", true, false)) {
+    push_warning("Creating table definition without schema_op_id column");
+    mysql_version = 50725;
+  }
+#endif
+  if (!define_table_ndb(new_table, mysql_version))
+    return false;
+
+  if (!create_table_in_NDB(new_table))
+    return false;
+
+  return true;
+}
+
+
+// Upgrade table
+bool Ndb_util_table::upgrade() const {
+  NdbDictionary::Table new_table(m_table_name.c_str());
+  if (!define_table_ndb(new_table, MYSQL_VERSION_ID)) {
+    return false;
+  }
+
+  const NdbDictionary::Table *old_table = get_table();
+
+  // Could copy stuff from old to new table if necessary...
+
+  // Drop the old table
+  if (!drop_table_in_NDB(*old_table)) {
+    return false;
+  }
+
+  // Create new table
+  if (!create_table_in_NDB(new_table)) {
+    return false;
+  }
+
+  return true;
+}
+
+
+std::string
+Ndb_util_table::unpack_varbinary(NdbRecAttr* ndbRecAttr) {
+  DBUG_ENTER("Ndb_util_table::unpack_varbinary");
+  // Function should be called only on a varbinary column
+  DBUG_ASSERT(ndbRecAttr->getType() == NdbDictionary::Column::Varbinary ||
+              ndbRecAttr->getType() == NdbDictionary::Column::Longvarbinary);
+
+  // Retrieve the complete packed value from the NdbRecAttr
+  char *packed_value = ndbRecAttr->aRef();
+  // Calculate the length bytes from column length
+  const uint length_bytes =
+      HA_VARCHAR_PACKLENGTH(ndbRecAttr->getColumn()->getLength());
+
+  // Read length of the varbinary which is stored in the value
+  const uint varbinary_length =
+      length_bytes == 1 ?
+          static_cast<uint>(packed_value[0]) : uint2korr(packed_value);
+  // the varbinary length and length bytes should add up
+  // to the total length of the data stored in ndbRecAttr
+  // or else the value is corrupted
+  DBUG_ASSERT(varbinary_length + length_bytes ==
+              ndbRecAttr->get_size_in_bytes());
+  DBUG_PRINT("info", ("varbinary length: %u", varbinary_length));
+
+  // Extract the actual row data and return
+  const char *varbinary_start =
+      reinterpret_cast<const char *>(packed_value + length_bytes);
+  DBUG_RETURN(std::string(varbinary_start, varbinary_length));
 }

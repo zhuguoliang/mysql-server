@@ -1,4 +1,4 @@
-/* Copyright (c) 2015, 2018, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2015, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -40,6 +40,7 @@
 #include "my_sys.h"  // my_write, my_malloc
 #include "mysql_com.h"
 #include "sql_string.h" /* STRING_PSI_MEMORY_KEY */
+#include "template_utils.h"
 
 /* purecov: begin inspected */
 static const char *log_filename = "test_sql_stmt";
@@ -73,7 +74,8 @@ static const char *sep =
     "========================================================================"
     "\n";
 
-#define WRITE_SEP() my_write(outfile, (uchar *)sep, strlen(sep), MYF(0))
+#define WRITE_SEP() \
+  my_write(outfile, pointer_cast<const uchar *>(sep), strlen(sep), MYF(0))
 
 static SERVICE_TYPE(registry) *reg_srv = nullptr;
 SERVICE_TYPE(log_builtins) *log_bi = nullptr;
@@ -716,7 +718,7 @@ static char *fieldflags2str(uint f) {
 }
 
 static void set_query_in_com_data(union COM_DATA *cmd, const char *query) {
-  cmd->com_query.query = (char *)query;
+  cmd->com_query.query = query;
   cmd->com_query.length = strlen(query);
 }
 
@@ -889,7 +891,7 @@ static void test_1(MYSQL_SESSION session, void *p) {
   params[0].unsigned_type = false;
   params[0].null_bit = false;
   params[0].value = (const unsigned char *)"5";
-  params[0].length = 2;
+  params[0].length = 1;
 
   params[1].type = MYSQL_TYPE_STRING;
   params[1].unsigned_type = false;
@@ -950,13 +952,13 @@ static void test_2(MYSQL_SESSION session, void *p) {
   params[0].unsigned_type = false;
   params[0].null_bit = false;
   params[0].value = (const unsigned char *)"4";
-  params[0].length = 2;
+  params[0].length = 1;
 
   params[1].type = MYSQL_TYPE_STRING;
   params[1].unsigned_type = false;
   params[1].null_bit = false;
   params[1].value = (const unsigned char *)"7";
-  params[1].length = 2;
+  params[1].length = 1;
 
   cmd.com_stmt_execute.stmt_id = ctx.stmt_id;
   cmd.com_stmt_execute.parameters = params;
@@ -1007,13 +1009,13 @@ static void test_3(MYSQL_SESSION session, void *p) {
   params[0].unsigned_type = false;
   params[0].null_bit = false;
   params[0].value = (const unsigned char *)"2";
-  params[0].length = 2;
+  params[0].length = 1;
 
   params[1].type = MYSQL_TYPE_STRING;
   params[1].unsigned_type = false;
   params[1].null_bit = false;
   params[1].value = (const unsigned char *)"3";
-  params[1].length = 2;
+  params[1].length = 1;
 
   cmd.com_stmt_execute.stmt_id = ctx.stmt_id;
   cmd.com_stmt_execute.parameter_count = 2;
@@ -1200,7 +1202,6 @@ static void test_5(MYSQL_SESSION session, void *p) {
 
   Server_context ctx;
   COM_DATA cmd;
-  uchar *data = nullptr;
 
   WRITE_STR("CREATE TABLE\n");
   set_query_in_com_data(&cmd,
@@ -1214,20 +1215,20 @@ static void test_5(MYSQL_SESSION session, void *p) {
   cmd.com_stmt_prepare.length = strlen(cmd.com_stmt_prepare.query);
   run_cmd(session, COM_STMT_PREPARE, &cmd, &ctx, false, p);
 
-  data = (uchar *)"Catalin ";
   cmd.com_stmt_send_long_data.stmt_id = ctx.stmt_id;
   cmd.com_stmt_send_long_data.param_number = 1;
   cmd.com_stmt_send_long_data.length = 8;
-  cmd.com_stmt_send_long_data.longdata = data;
+  cmd.com_stmt_send_long_data.longdata =
+      const_cast<uchar *>(pointer_cast<const uchar *>("Catalin "));
   WRITE_STR("SEND PARAMETER AS COM_STMT_SEND_LONG_DATA\n");
   run_cmd(session, COM_STMT_SEND_LONG_DATA, &cmd, &ctx, false, p);
 
-  data = (uchar *)"Besleaga";
   cmd.com_stmt_send_long_data.stmt_id = ctx.stmt_id;
   // Append data to the same parameter
   cmd.com_stmt_send_long_data.param_number = 1;
   cmd.com_stmt_send_long_data.length = 8;
-  cmd.com_stmt_send_long_data.longdata = data;
+  cmd.com_stmt_send_long_data.longdata =
+      const_cast<uchar *>(pointer_cast<const uchar *>("Besleaga"));
   WRITE_STR("APPEND TO THE SAME COLUMN\n");
   run_cmd(session, COM_STMT_SEND_LONG_DATA, &cmd, &ctx, false, p);
 
@@ -1264,22 +1265,22 @@ static void test_5(MYSQL_SESSION session, void *p) {
   run_cmd(session, COM_QUERY, &cmd, &ctx, false, p);
 
   // Send long data to non existing prepared statement
-  data = (uchar *)"12345";
   cmd.com_stmt_send_long_data.stmt_id = 199999;
   cmd.com_stmt_send_long_data.param_number = 1;
   cmd.com_stmt_send_long_data.length = 8;
-  cmd.com_stmt_send_long_data.longdata = data;
+  cmd.com_stmt_send_long_data.longdata =
+      const_cast<uchar *>(pointer_cast<const uchar *>("12345"));
   WRITE_STR("APPEND TO A NON EXISTING STATEMENT\n");
   run_cmd(session, COM_STMT_SEND_LONG_DATA, &cmd, &ctx, false, p);
   WRITE_STR("ERRORS ONLY SHOW AT FIRST EXECUTION OF COM_STMT_EXECUTE\n");
   run_cmd(session, COM_STMT_EXECUTE, &cmd, &ctx, false, p);
 
   // Send long data to non existing parameter
-  data = (uchar *)"12345";
   cmd.com_stmt_send_long_data.stmt_id = ctx.stmt_id;
   cmd.com_stmt_send_long_data.param_number = 15;
   cmd.com_stmt_send_long_data.length = 8;
-  cmd.com_stmt_send_long_data.longdata = data;
+  cmd.com_stmt_send_long_data.longdata =
+      const_cast<uchar *>(pointer_cast<const uchar *>("12345"));
   WRITE_STR("APPEND DATA TO NON EXISTING PARAMETER\n");
   run_cmd(session, COM_STMT_SEND_LONG_DATA, &cmd, &ctx, false, p);
   WRITE_STR("ERRORS ONLY SHOW AT FIRST EXECUTION OF COM_STMT_EXECUTE\n");
@@ -1829,6 +1830,12 @@ static void test_in_spawned_thread(void *p, void (*test_function)(void *)) {
   my_thread_attr_t attr; /* Thread attributes */
   my_thread_attr_init(&attr);
   (void)my_thread_attr_setdetachstate(&attr, MY_THREAD_CREATE_JOINABLE);
+
+  // Default stack size may be too small.
+  size_t stacksize = 0;
+  my_thread_attr_getstacksize(&attr, &stacksize);
+  if (stacksize < my_thread_stack_size)
+    my_thread_attr_setstacksize(&attr, my_thread_stack_size);
 
   struct test_thread_context context;
 

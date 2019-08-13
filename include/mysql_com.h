@@ -1,4 +1,4 @@
-/* Copyright (c) 2000, 2018, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2000, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -51,7 +51,6 @@
 #include <stdbool.h>
 #endif
 
-#define HOSTNAME_LENGTH 60
 #define SYSTEM_CHARSET_MBMAXLEN 3
 #define FILENAME_CHARSET_MBMAXLEN 5
 #define NAME_CHAR_LEN 64 /**< Field/table name length */
@@ -92,14 +91,6 @@
   @ref page_protocol_basic_eof_packet.
 */
 #define MAX_PACKET_LENGTH (256L * 256L * 256L - 1)
-
-/**
-  Length of string buffer, that is enough to contain
-  username and hostname parts of the user identifier with trailing zero in
-  MySQL standard format:
-  user_name_part\@host_name_part\\0
-*/
-#define USER_HOST_BUFF_SIZE HOSTNAME_LENGTH + USERNAME_LENGTH + 2
 
 #define LOCAL_HOST "localhost"
 #define LOCAL_HOST_NAMEDPIPE "."
@@ -187,6 +178,10 @@
 #define FIELD_IS_MARKED                   \
   (1 << 28) /**< Intern: field is marked, \
                  general purpose */
+
+/** Field will not be loaded in secondary engine. */
+#define NOT_SECONDARY_FLAG (1 << 29)
+
 /** @}*/
 
 /**
@@ -241,7 +236,7 @@
    @defgroup group_cs_capabilities_flags Capabilities Flags
    @ingroup group_cs
 
-   @brief Values for the capabilities flag bitmask used by @ref PAGE_PROTOCOL
+   @brief Values for the capabilities flag bitmask used by the MySQL protocol
 
    Currently need to fit into 32 bits.
 
@@ -997,7 +992,6 @@ bool net_write_command(struct NET *net, unsigned char command,
 bool net_write_packet(struct NET *net, const unsigned char *packet,
                       size_t length);
 unsigned long my_net_read(struct NET *net);
-
 void my_net_set_write_timeout(struct NET *net, unsigned int timeout);
 void my_net_set_read_timeout(struct NET *net, unsigned int timeout);
 void my_net_set_retry_count(struct NET *net, unsigned int retry_count);

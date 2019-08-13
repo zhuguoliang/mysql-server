@@ -1,4 +1,4 @@
-/* Copyright (c) 2008, 2018, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2008, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -37,6 +37,7 @@
 #include "my_loglevel.h"
 #include "mysql/components/services/log_builtins.h"
 #include "mysql/components/services/log_shared.h"
+#include "mysql/plugin.h"
 #include "mysql/psi/mysql_mutex.h"
 #include "mysql/psi/psi_base.h"
 #include "mysql/service_mysql_alloc.h"
@@ -158,52 +159,36 @@ int get_user_var_str(const char *name, char *value, size_t len,
 }
 
 int delegates_init() {
-  static my_aligned_storage<sizeof(Trans_delegate), MY_ALIGNOF(longlong)>
-      trans_mem;
-  static my_aligned_storage<sizeof(Binlog_storage_delegate),
-                            MY_ALIGNOF(longlong)>
-      storage_mem;
-  static my_aligned_storage<sizeof(Server_state_delegate), MY_ALIGNOF(longlong)>
-      server_state_mem;
-  static my_aligned_storage<sizeof(Binlog_transmit_delegate),
-                            MY_ALIGNOF(longlong)>
-      transmit_mem;
-  static my_aligned_storage<sizeof(Binlog_relay_IO_delegate),
-                            MY_ALIGNOF(longlong)>
-      relay_io_mem;
-
-  void *place_trans_mem = trans_mem.data;
-  void *place_storage_mem = storage_mem.data;
-  void *place_state_mem = server_state_mem.data;
+  alignas(Trans_delegate) static char place_trans_mem[sizeof(Trans_delegate)];
+  alignas(Binlog_storage_delegate) static char
+      place_storage_mem[sizeof(Binlog_storage_delegate)];
+  alignas(Server_state_delegate) static char
+      place_state_mem[sizeof(Server_state_delegate)];
+  alignas(Binlog_transmit_delegate) static char
+      place_transmit_mem[sizeof(Binlog_transmit_delegate)];
+  alignas(Binlog_relay_IO_delegate) static char
+      place_relay_io_mem[sizeof(Binlog_relay_IO_delegate)];
 
   transaction_delegate = new (place_trans_mem) Trans_delegate;
-
   if (!transaction_delegate->is_inited()) {
     LogErr(ERROR_LEVEL, ER_RPL_TRX_DELEGATES_INIT_FAILED);
     return 1;
   }
 
   binlog_storage_delegate = new (place_storage_mem) Binlog_storage_delegate;
-
   if (!binlog_storage_delegate->is_inited()) {
     LogErr(ERROR_LEVEL, ER_RPL_BINLOG_STORAGE_DELEGATES_INIT_FAILED);
     return 1;
   }
 
   server_state_delegate = new (place_state_mem) Server_state_delegate;
-
-  void *place_transmit_mem = transmit_mem.data;
-  void *place_relay_io_mem = relay_io_mem.data;
-
   binlog_transmit_delegate = new (place_transmit_mem) Binlog_transmit_delegate;
-
   if (!binlog_transmit_delegate->is_inited()) {
     LogErr(ERROR_LEVEL, ER_RPL_BINLOG_TRANSMIT_DELEGATES_INIT_FAILED);
     return 1;
   }
 
   binlog_relay_io_delegate = new (place_relay_io_mem) Binlog_relay_IO_delegate;
-
   if (!binlog_relay_io_delegate->is_inited()) {
     LogErr(ERROR_LEVEL, ER_RPL_BINLOG_RELAY_DELEGATES_INIT_FAILED);
     return 1;
@@ -309,6 +294,12 @@ void delegates_destroy() {
   */                                                                   \
   if (!plugins.empty()) plugin_unlock_list(0, &plugins[0], plugins.size());
 
+static bool se_before_commit(THD *, plugin_ref plugin, void *arg) {
+  handlerton *hton = plugin_data<handlerton *>(plugin);
+  if (hton->se_before_commit) hton->se_before_commit(arg);
+  return false;
+}
+
 int Trans_delegate::before_commit(THD *thd, bool all,
                                   Binlog_cache_storage *trx_cache_log,
                                   Binlog_cache_storage *stmt_cache_log,
@@ -340,6 +331,7 @@ int Trans_delegate::before_commit(THD *thd, bool all,
 
   int ret = 0;
   FOREACH_OBSERVER(ret, before_commit, (&param));
+  plugin_foreach(thd, se_before_commit, MYSQL_STORAGE_ENGINE_PLUGIN, &param);
   DBUG_RETURN(ret);
 }
 
@@ -383,13 +375,13 @@ void prepare_table_info(THD *thd, Trans_table_info *&table_info_list,
   TABLE *open_tables = thd->open_tables;
 
   // Fail if tables are not open
-  if (open_tables == NULL) {
+  if (open_tables == nullptr) {
     DBUG_VOID_RETURN;
   }
 
   // Gather table information
   std::vector<Trans_table_info> table_info_holder;
-  for (; open_tables != NULL; open_tables = open_tables->next) {
+  for (; open_tables != nullptr; open_tables = open_tables->next) {
     Trans_table_info table_info = {0, 0, 0, 0};
 
     if (open_tables->no_replicate) {
@@ -399,7 +391,7 @@ void prepare_table_info(THD *thd, Trans_table_info *&table_info_list,
     table_info.table_name = open_tables->s->table_name.str;
 
     uint primary_keys = 0;
-    if (open_tables->key_info != NULL &&
+    if (open_tables->key_info != nullptr &&
         (open_tables->s->primary_key < MAX_KEY)) {
       primary_keys = open_tables->s->primary_key;
 
@@ -492,6 +484,12 @@ int Trans_delegate::before_dml(THD *thd, int &result) {
   DBUG_RETURN(ret);
 }
 
+static bool se_before_rollback(THD *, plugin_ref plugin, void *arg) {
+  handlerton *hton = plugin_data<handlerton *>(plugin);
+  if (hton->se_before_rollback) hton->se_before_rollback(arg);
+  return false;
+}
+
 int Trans_delegate::before_rollback(THD *thd, bool all) {
   DBUG_ENTER("Trans_delegate::before_rollback");
   Trans_param param;
@@ -507,7 +505,14 @@ int Trans_delegate::before_rollback(THD *thd, bool all) {
 
   int ret = 0;
   FOREACH_OBSERVER(ret, before_rollback, (&param));
+  plugin_foreach(thd, se_before_rollback, MYSQL_STORAGE_ENGINE_PLUGIN, &param);
   DBUG_RETURN(ret);
+}
+
+static bool se_after_commit(THD *, plugin_ref plugin, void *arg) {
+  handlerton *hton = plugin_data<handlerton *>(plugin);
+  if (hton->se_after_commit) hton->se_after_commit(arg);
+  return false;
 }
 
 int Trans_delegate::after_commit(THD *thd, bool all) {
@@ -536,6 +541,7 @@ int Trans_delegate::after_commit(THD *thd, bool all) {
 
   int ret = 0;
   FOREACH_OBSERVER(ret, after_commit, (&param));
+  plugin_foreach(thd, se_after_commit, MYSQL_STORAGE_ENGINE_PLUGIN, &param);
   DBUG_RETURN(ret);
 }
 
@@ -776,9 +782,10 @@ int Binlog_transmit_delegate::before_send_event(THD *thd, ushort flags,
   DBUG_EXECUTE_IF("crash_binlog_transmit_hook", DBUG_SUICIDE(););
 
   int ret = 0;
-  FOREACH_OBSERVER(ret, before_send_event,
-                   (&param, (uchar *)packet->ptr(), packet->length(),
-                    log_file + dirname_length(log_file), log_pos));
+  FOREACH_OBSERVER(
+      ret, before_send_event,
+      (&param, pointer_cast<uchar *>(packet->ptr()), packet->length(),
+       log_file + dirname_length(log_file), log_pos));
   return ret;
 }
 
@@ -1038,7 +1045,7 @@ int launch_hook_trans_begin(THD *thd, TABLE_LIST *all_tables) {
 
     // if select is an udf function
     SELECT_LEX *select_lex_elem = lex->unit->first_select();
-    while (select_lex_elem != NULL) {
+    while (select_lex_elem != nullptr) {
       Item *item;
       List_iterator_fast<Item> it(select_lex_elem->fields_list);
       while ((item = it++)) {

@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2000, 2018, Oracle and/or its affiliates. All rights reserved.
+   Copyright (c) 2000, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -66,15 +66,16 @@
 #include "sql/dd/cache/dictionary_client.h"  // Dictionary_client
 #include "sql/dd/dd.h"                       // dd::get_dictionary()
 #include "sql/dd/dd_schema.h"                // dd::create_schema
+#include "sql/dd/dd_table.h"                 // is_encrypted()
 #include "sql/dd/dictionary.h"               // dd::Dictionary
 #include "sql/dd/string_type.h"
 #include "sql/dd/types/abstract_table.h"
 #include "sql/dd/types/schema.h"
-#include "sql/dd/upgrade/upgrade.h"  // dd::upgrade::in_progress
-#include "sql/debug_sync.h"          // DEBUG_SYNC
-#include "sql/derror.h"              // ER_THD
-#include "sql/error_handler.h"       // Drop_table_error_handler
-#include "sql/events.h"              // Events
+#include "sql/dd/upgrade_57/upgrade.h"  // dd::upgrade::in_progress
+#include "sql/debug_sync.h"             // DEBUG_SYNC
+#include "sql/derror.h"                 // ER_THD
+#include "sql/error_handler.h"          // Drop_table_error_handler
+#include "sql/events.h"                 // Events
 #include "sql/handler.h"
 #include "sql/lock.h"       // lock_schema_name
 #include "sql/log.h"        // log_*()
@@ -249,6 +250,25 @@ bool mysql_create_db(THD *thd, const char *db, HA_CREATE_INFO *create_info) {
   }
 
   /*
+    Check if user has permission to alter database, if encryption type
+    provided differ from global 'default_table_encryption' setting.
+    We use 'default_table_encryption' value if encryption is not supplied
+    by user.
+  */
+  bool encrypt_schema = false;
+  if (create_info->encrypt_type.str) {
+    encrypt_schema = dd::is_encrypted(create_info->encrypt_type);
+  } else {
+    encrypt_schema = thd->variables.default_table_encryption;
+  }
+  if (opt_table_encryption_privilege_check &&
+      encrypt_schema != thd->variables.default_table_encryption &&
+      check_table_encryption_admin_access(thd)) {
+    my_error(ER_CANNOT_SET_DATABASE_ENCRYPTION, MYF(0));
+    DBUG_RETURN(true);
+  }
+
+  /*
     When creating the schema, we must lock the schema name without case (for
     correct MDL locking) when l_c_t_n == 2.
   */
@@ -334,9 +354,6 @@ bool mysql_create_db(THD *thd, const char *db, HA_CREATE_INFO *create_info) {
     }
   }
 
-  ha_binlog_log_query(thd, 0, LOGCOM_CREATE_DB, thd->query().str,
-                      thd->query().length, db, "");
-
   /*
     Create schema in DD. This is done even when initializing the server
     and creating the system schema. In that case, the shared cache will
@@ -347,7 +364,8 @@ bool mysql_create_db(THD *thd, const char *db, HA_CREATE_INFO *create_info) {
   if (store_in_dd) {
     set_db_default_charset(thd, create_info);
 
-    if (dd::create_schema(thd, db, create_info->default_table_charset)) {
+    if (dd::create_schema(thd, db, create_info->default_table_charset,
+                          encrypt_schema)) {
       /*
         We could be here due an deadlock or some error reported
         by DD API framework. We remove the database directory
@@ -359,14 +377,15 @@ bool mysql_create_db(THD *thd, const char *db, HA_CREATE_INFO *create_info) {
         database operation. Even if the call fails due to some
         other error we ignore the error as we anyway return
         failure (true) here.
-
-        We rely on called to do rollback in case of error and thus
-        revert change to the binary log.
       */
       if (!schema_dir_exists) rm_dir_w_symlink(path, true);
       DBUG_RETURN(true);
     }
   }
+
+  // Log the query in the handler's binlog
+  ha_binlog_log_query(thd, nullptr, LOGCOM_CREATE_DB, thd->query().str,
+                      thd->query().length, db, "");
 
   /*
     If we have not added database to the data-dictionary we don't have
@@ -403,6 +422,18 @@ bool mysql_alter_db(THD *thd, const char *db, HA_CREATE_INFO *create_info) {
     DBUG_RETURN(true);
   }
 
+  /*
+    Check if user has permission to alter database, if encryption type
+    provided differ from global 'default_table_encryption' setting.
+  */
+  if (create_info->encrypt_type.str && opt_table_encryption_privilege_check &&
+      dd::is_encrypted(create_info->encrypt_type) !=
+          thd->variables.default_table_encryption &&
+      check_table_encryption_admin_access(thd)) {
+    my_error(ER_CANNOT_SET_DATABASE_ENCRYPTION, MYF(0));
+    DBUG_RETURN(true);
+  }
+
   if (lock_schema_name(thd, db)) DBUG_RETURN(true);
 
   set_db_default_charset(thd, create_info);
@@ -419,6 +450,10 @@ bool mysql_alter_db(THD *thd, const char *db, HA_CREATE_INFO *create_info) {
 
   // Set new collation ID.
   schema->set_default_collation_id(create_info->default_table_charset->number);
+
+  // Set encryption type.
+  if (create_info->encrypt_type.length > 0)
+    schema->set_default_encryption(dd::is_encrypted(create_info->encrypt_type));
 
   // Update schema.
   if (thd->dd_client()->update(schema)) DBUG_RETURN(true);
@@ -585,6 +620,7 @@ bool mysql_rm_db(THD *thd, const LEX_CSTRING &db, bool if_exists) {
     if (lock_table_names(thd, tables, NULL, thd->variables.lock_wait_timeout,
                          0) ||
         rm_table_do_discovery_and_lock_fk_tables(thd, tables) ||
+        lock_check_constraint_names(thd, tables) ||
         Events::lock_schema_events(thd, *schema) ||
         lock_db_routines(thd, *schema) || lock_trigger_names(thd, tables))
       DBUG_RETURN(true);
@@ -727,7 +763,7 @@ bool mysql_rm_db(THD *thd, const LEX_CSTRING &db, bool if_exists) {
     */
     if (thd->session_tracker.get_tracker(CURRENT_SCHEMA_TRACKER)
             ->is_enabled()) {
-      LEX_CSTRING dummy = {C_STRING_WITH_LEN("")};
+      LEX_CSTRING dummy = {STRING_WITH_LEN("")};
       dummy.length = dummy.length * 1;
       thd->session_tracker.get_tracker(CURRENT_SCHEMA_TRACKER)
           ->mark_as_changed(thd, &dummy);
@@ -1011,7 +1047,7 @@ static void mysql_change_db_impl(THD *thd, const LEX_CSTRING &new_db_name,
       INFORMATION_SCHEMA_NAME constant.
     */
 
-    thd->set_db(to_lex_cstring(INFORMATION_SCHEMA_NAME));
+    thd->set_db(INFORMATION_SCHEMA_NAME);
   } else {
     /*
       Here we already have a copy of database name to be used in THD. So,
@@ -1188,8 +1224,8 @@ bool mysql_change_db(THD *thd, const LEX_CSTRING &new_db_name,
   if (is_infoschema_db(new_db_name.str, new_db_name.length)) {
     /* Switch the current database to INFORMATION_SCHEMA. */
 
-    mysql_change_db_impl(thd, to_lex_cstring(INFORMATION_SCHEMA_NAME),
-                         SELECT_ACL, system_charset_info);
+    mysql_change_db_impl(thd, INFORMATION_SCHEMA_NAME, SELECT_ACL,
+                         system_charset_info);
     goto done;
   }
 
@@ -1229,16 +1265,17 @@ bool mysql_change_db(THD *thd, const LEX_CSTRING &new_db_name,
 
   if (sctx->get_active_roles()->size() == 0) {
     db_access =
-        sctx->check_access(DB_ACLS)
-            ? DB_ACLS
+        sctx->check_access(DB_OP_ACLS, new_db_file_name.str)
+            ? DB_OP_ACLS
             : acl_get(thd, sctx->host().str, sctx->ip().str,
                       sctx->priv_user().str, new_db_file_name.str, false) |
-                  sctx->master_access();
+                  sctx->master_access(new_db_file_name.str);
   } else {
-    db_access = sctx->db_acl(new_db_file_name_cstr) | sctx->master_access();
+    db_access = sctx->db_acl(new_db_file_name_cstr) |
+                sctx->master_access(new_db_file_name.str);
   }
 
-  if (!force_switch && !(db_access & DB_ACLS) &&
+  if (!force_switch && !(db_access & DB_OP_ACLS) &&
       check_grant_db(thd, new_db_file_name.str)) {
     my_error(ER_DBACCESS_DENIED_ERROR, MYF(0), sctx->priv_user().str,
              sctx->priv_host().str, new_db_file_name.str);
@@ -1301,7 +1338,7 @@ done:
     Check if current database tracker is enabled. If so, set the 'changed' flag.
   */
   if (thd->session_tracker.get_tracker(CURRENT_SCHEMA_TRACKER)->is_enabled()) {
-    LEX_CSTRING dummy = {C_STRING_WITH_LEN("")};
+    LEX_CSTRING dummy = {STRING_WITH_LEN("")};
     dummy.length = dummy.length * 1;
     thd->session_tracker.get_tracker(CURRENT_SCHEMA_TRACKER)
         ->mark_as_changed(thd, &dummy);

@@ -1,4 +1,4 @@
-/* Copyright (c) 2006, 2018, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2006, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -46,7 +46,6 @@
 #include "sql/auth/auth_common.h"  // *_ACL
 #include "sql/create_field.h"
 #include "sql/derror.h"  // ER_THD
-#include "sql/error_handler.h"
 #include "sql/field.h"
 #include "sql/handler.h"
 #include "sql/item.h"
@@ -77,7 +76,7 @@ partition_info *partition_info::get_clone(THD *thd, bool reset /* = false */) {
   DBUG_ENTER("partition_info::get_clone");
   List_iterator<partition_element> part_it(partitions);
   partition_element *part;
-  partition_info *clone = new (*THR_MALLOC) partition_info(*this);
+  partition_info *clone = new (thd->mem_root) partition_info(*this);
   if (!clone) {
     mem_alloc_error(sizeof(partition_info));
     DBUG_RETURN(NULL);
@@ -91,7 +90,8 @@ partition_info *partition_info::get_clone(THD *thd, bool reset /* = false */) {
   while ((part = (part_it++))) {
     List_iterator<partition_element> subpart_it(part->subpartitions);
     partition_element *subpart;
-    partition_element *part_clone = new (*THR_MALLOC) partition_element(*part);
+    partition_element *part_clone =
+        new (thd->mem_root) partition_element(*part);
     if (!part_clone) {
       mem_alloc_error(sizeof(partition_element));
       DBUG_RETURN(NULL);
@@ -122,7 +122,7 @@ partition_info *partition_info::get_clone(THD *thd, bool reset /* = false */) {
     part_clone->subpartitions.empty();
     while ((subpart = (subpart_it++))) {
       partition_element *subpart_clone =
-          new (*THR_MALLOC) partition_element(*subpart);
+          new (thd->mem_root) partition_element(*subpart);
       if (!subpart_clone) {
         mem_alloc_error(sizeof(partition_element));
         DBUG_RETURN(NULL);
@@ -461,6 +461,8 @@ bool partition_info::can_prune_insert(THD *thd, enum_duplicates duplic,
   @returns Operational status
     @retval false  Success
     @retval true   Failure
+  A return value of 'true' may indicate conversion error,
+  so caller must check thd->is_error().
 */
 
 bool partition_info::set_used_partition(List<Item> &fields, List<Item> &values,
@@ -470,28 +472,26 @@ bool partition_info::set_used_partition(List<Item> &fields, List<Item> &values,
   THD *thd = table->in_use;
   uint32 part_id;
   longlong func_value;
-  Dummy_error_handler error_handler;
-  bool ret = true;
-  DBUG_ENTER("set_partition");
+
   DBUG_ASSERT(thd);
 
   /* Only allow checking of constant values */
   List_iterator_fast<Item> v(values);
   Item *item;
-  thd->push_internal_handler(&error_handler);
+
   while ((item = v++)) {
-    if (!item->const_item()) goto err;
+    if (!item->const_item()) return true;
   }
 
   if (copy_default_values) restore_record(table, s->default_values);
 
   if (fields.elements || !values.elements) {
     if (fill_record(thd, table, fields, values, &full_part_field_set, NULL))
-      goto err;
+      return true;
   } else {
     if (fill_record(thd, table, table->field, values, &full_part_field_set,
                     NULL))
-      goto err;
+      return true;
   }
   DBUG_ASSERT(!table->auto_increment_field_not_null);
 
@@ -513,36 +513,32 @@ bool partition_info::set_used_partition(List<Item> &fields, List<Item> &values,
     my_bitmap_map *old_map = dbug_tmp_use_all_columns(table, table->read_set);
     const int rc = get_partition_id(this, &part_id, &func_value);
     dbug_tmp_restore_column_map(table->read_set, old_map);
-    if (rc) goto err;
+    if (rc) return true;
   }
 
   DBUG_PRINT("info", ("Insert into partition %u", part_id));
   bitmap_set_bit(used_partitions, part_id);
-  ret = false;
-
-err:
-  thd->pop_internal_handler();
-  DBUG_RETURN(ret);
+  return false;
 }
 
-  /*
-    Create a memory area where default partition names are stored and fill it
-    up with the names.
+/*
+  Create a memory area where default partition names are stored and fill it
+  up with the names.
 
-    SYNOPSIS
-      create_default_partition_names()
-      num_parts                       Number of partitions
-      start_no                        Starting partition number
-      subpart                         Is it subpartitions
+  SYNOPSIS
+    create_default_partition_names()
+    num_parts                       Number of partitions
+    start_no                        Starting partition number
+    subpart                         Is it subpartitions
 
-    RETURN VALUE
-      A pointer to the memory area of the default partition names
+  RETURN VALUE
+    A pointer to the memory area of the default partition names
 
-    DESCRIPTION
-      A support routine for the partition code where default values are
-      generated.
-      The external routine needing this code is check_partition_info
-  */
+  DESCRIPTION
+    A support routine for the partition code where default values are
+    generated.
+    The external routine needing this code is check_partition_info
+*/
 
 #define MAX_PART_NAME_SIZE 8
 
@@ -580,10 +576,10 @@ void partition_info::set_show_version_string(String *packet) {
     packet->append(STRING_WITH_LEN("\n/*!50500"));
   else {
     if (part_expr)
-      part_expr->walk(&Item::intro_version, Item::WALK_POSTFIX,
+      part_expr->walk(&Item::intro_version, enum_walk::POSTFIX,
                       (uchar *)&version);
     if (subpart_expr)
-      subpart_expr->walk(&Item::intro_version, Item::WALK_POSTFIX,
+      subpart_expr->walk(&Item::intro_version, enum_walk::POSTFIX,
                          (uchar *)&version);
     if (version == 0) {
       /* No new functions in partition function */
@@ -1159,7 +1155,8 @@ bool partition_info::check_range_constants(THD *thd) {
     longlong part_range_value;
     bool signed_flag = !part_expr->unsigned_flag;
 
-    range_int_array = (longlong *)sql_alloc(num_parts * sizeof(longlong));
+    range_int_array =
+        (longlong *)(*THR_MALLOC)->Alloc(num_parts * sizeof(longlong));
     if (unlikely(range_int_array == NULL)) {
       mem_alloc_error(num_parts * sizeof(longlong));
       goto end;
@@ -1438,14 +1435,14 @@ bool partition_info::check_partition_info(THD *thd, handlerton **eng_type,
     if (!list_of_part_fields) {
       DBUG_ASSERT(part_expr);
       err = part_expr->walk(&Item::check_partition_func_processor,
-                            Item::WALK_POSTFIX, NULL);
+                            enum_walk::POSTFIX, NULL);
     }
 
     /* Check for sub partition expression. */
     if (!err && is_sub_partitioned() && !list_of_subpart_fields) {
       DBUG_ASSERT(subpart_expr);
       err = subpart_expr->walk(&Item::check_partition_func_processor,
-                               Item::WALK_POSTFIX, NULL);
+                               enum_walk::POSTFIX, NULL);
     }
 
     if (err) {
@@ -1636,7 +1633,7 @@ end:
 
 void partition_info::print_no_partition_found(THD *thd, TABLE *table_arg) {
   char buf[100];
-  char *buf_ptr = (char *)&buf;
+  const char *buf_ptr = buf;
   TABLE_LIST table_list;
 
   table_list.db = table_arg->s->db.str;
@@ -1647,12 +1644,12 @@ void partition_info::print_no_partition_found(THD *thd, TABLE *table_arg) {
                ER_THD(thd, ER_NO_PARTITION_FOR_GIVEN_VALUE_SILENT), MYF(0));
   } else {
     if (column_list)
-      buf_ptr = (char *)"from column_list";
+      buf_ptr = "from column_list";
     else {
       my_bitmap_map *old_map =
           dbug_tmp_use_all_columns(table_arg, table_arg->read_set);
       if (part_expr->null_value)
-        buf_ptr = (char *)"NULL";
+        buf_ptr = "NULL";
       else
         longlong2str(err_value, buf, part_expr->unsigned_flag ? 10 : -10);
       dbug_tmp_restore_column_map(table_arg->read_set, old_map);
@@ -1770,7 +1767,7 @@ bool partition_info::set_up_charset_field_preps() {
     if (!(char_ptrs = (uchar **)sql_calloc(size))) goto error;
     restore_part_field_ptrs = char_ptrs;
     size = (tot_part_fields + 1) * sizeof(Field *);
-    if (!(char_ptrs = (uchar **)sql_alloc(size))) goto error;
+    if (!(char_ptrs = (uchar **)(*THR_MALLOC)->Alloc(size))) goto error;
     part_charset_field_array = (Field **)char_ptrs;
     ptr = part_field_array;
     i = 0;
@@ -1801,7 +1798,7 @@ bool partition_info::set_up_charset_field_preps() {
     if (!(char_ptrs = (uchar **)sql_calloc(size))) goto error;
     restore_subpart_field_ptrs = char_ptrs;
     size = (tot_subpart_fields + 1) * sizeof(Field *);
-    if (!(char_ptrs = (uchar **)sql_alloc(size))) goto error;
+    if (!(char_ptrs = (uchar **)(*THR_MALLOC)->Alloc(size))) goto error;
     subpart_charset_field_array = (Field **)char_ptrs;
     ptr = subpart_field_array;
     i = 0;
@@ -2099,7 +2096,7 @@ bool Parser_partition_info::add_column_list_value(THD *thd, Item *item) {
   else
     thd->where = "partition function";
 
-  if (item->walk(&Item::check_partition_func_processor, Item::WALK_POSTFIX,
+  if (item->walk(&Item::check_partition_func_processor, enum_walk::POSTFIX,
                  NULL)) {
     my_error(ER_PARTITION_FUNCTION_IS_NOT_ALLOWED, MYF(0));
     DBUG_RETURN(true);
@@ -2882,7 +2879,7 @@ bool partition_info::init_partition_bitmap(MY_BITMAP *bitmap,
   uint bitmap_bits = num_subparts ? (num_subparts * num_parts) : num_parts;
   uint bitmap_bytes = bitmap_buffer_size(bitmap_bits);
 
-  if (!(bitmap_buf = (uint32 *)alloc_root(mem_root, bitmap_bytes))) {
+  if (!(bitmap_buf = (uint32 *)mem_root->Alloc(bitmap_bytes))) {
     mem_alloc_error(bitmap_bytes);
     return true;
   }

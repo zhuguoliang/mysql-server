@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2000, 2018, Oracle and/or its affiliates. All rights reserved.
+   Copyright (c) 2000, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -505,10 +505,10 @@ bool Sql_cmd_load_table::execute_inner(THD *thd,
   if (!(error = read_info.error)) {
     table->next_number_field = table->found_next_number_field;
     if (thd->lex->is_ignore() || handle_duplicates == DUP_REPLACE)
-      table->file->extra(HA_EXTRA_IGNORE_DUP_KEY);
+      table->file->ha_extra(HA_EXTRA_IGNORE_DUP_KEY);
     if (handle_duplicates == DUP_REPLACE &&
         (!table->triggers || !table->triggers->has_delete_triggers()))
-      table->file->extra(HA_EXTRA_WRITE_CAN_REPLACE);
+      table->file->ha_extra(HA_EXTRA_WRITE_CAN_REPLACE);
     if (thd->locked_tables_mode <= LTM_LOCK_TABLES)
       table->file->ha_start_bulk_insert((ha_rows)0);
     table->copy_blobs = 1;
@@ -778,6 +778,12 @@ bool Sql_cmd_load_table::read_fixed_length(THD *thd, COPY_INFO &info,
                            TRG_EVENT_INSERT, table->s->fields))
       DBUG_RETURN(true);
 
+    if (invoke_table_check_constraints(thd, table)) {
+      if (thd->is_error()) DBUG_RETURN(true);
+      // continue when IGNORE clause is used.
+      goto continue_loop;
+    }
+
     switch (table_list->view_check_option(thd)) {
       case VIEW_CHECK_SKIP:
         read_info.next_line();
@@ -997,6 +1003,12 @@ bool Sql_cmd_load_table::read_sep_field(THD *thd, COPY_INFO &info,
 
     if (thd->is_error()) DBUG_RETURN(true);
 
+    if (invoke_table_check_constraints(thd, table)) {
+      if (thd->is_error()) DBUG_RETURN(true);
+      // continue when IGNORE clause is used.
+      goto continue_loop;
+    }
+
     switch (table_list->view_check_option(thd)) {
       case VIEW_CHECK_SKIP:
         read_info.next_line();
@@ -1115,11 +1127,11 @@ bool Sql_cmd_load_table::read_xml_field(THD *thd, COPY_INFO &info,
         field->set_notnull();
         if (field == table->next_number_field)
           table->auto_increment_field_not_null = true;
-        field->store((char *)tag->value.ptr(), tag->value.length(), cs);
+        field->store(tag->value.ptr(), tag->value.length(), cs);
       } else {
         DBUG_ASSERT(NULL != dynamic_cast<Item_user_var_as_out_param *>(item));
         ((Item_user_var_as_out_param *)item)
-            ->set_value((char *)tag->value.ptr(), tag->value.length(), cs);
+            ->set_value(tag->value.ptr(), tag->value.length(), cs);
       }
     }
 
@@ -1158,6 +1170,12 @@ bool Sql_cmd_load_table::read_xml_field(THD *thd, COPY_INFO &info,
                            thd, &info, m_opt_set_fields, m_opt_set_exprs, table,
                            TRG_EVENT_INSERT, table->s->fields))
       DBUG_RETURN(true);
+
+    if (invoke_table_check_constraints(thd, table)) {
+      if (thd->is_error()) DBUG_RETURN(true);
+      // continue when IGNORE clause is used.
+      goto continue_loop;
+    }
 
     switch (table_list->view_check_option(thd)) {
       case VIEW_CHECK_SKIP:
@@ -1261,7 +1279,7 @@ READ_INFO::READ_INFO(File file_par, uint tot_length, const CHARSET_INFO *cs,
   size_t length =
       max<size_t>(cs->mbmaxlen, max(field_term_length, line_term_length)) + 1;
   set_if_bigger(length, line_start.length());
-  stack = stack_pos = (int *)sql_alloc(sizeof(int) * length);
+  stack = stack_pos = (int *)(*THR_MALLOC)->Alloc(sizeof(int) * length);
 
   if (!(buffer = (uchar *)my_malloc(key_memory_READ_INFO, buff_length + 1,
                                     MYF(MY_WME))))

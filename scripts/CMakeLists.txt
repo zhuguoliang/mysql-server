@@ -1,4 +1,4 @@
-# Copyright (c) 2006, 2018, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2006, 2019, Oracle and/or its affiliates. All rights reserved.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
@@ -20,11 +20,7 @@
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
-# Build comp_sql - used for embedding SQL in C or C++ programs
-IF(NOT CMAKE_CROSSCOMPILING)
- MYSQL_ADD_EXECUTABLE(comp_sql comp_sql.cc SKIP_INSTALL)
- TARGET_LINK_LIBRARIES(comp_sql)
-ENDIF()
+MYSQL_ADD_EXECUTABLE(comp_sql comp_sql.cc SKIP_INSTALL)
 
 # Add compiler information, for easier debugging of output from mysql_config.
 SET(COMPILER_ID_AND_VERSION
@@ -80,14 +76,14 @@ ELSE()
   MESSAGE(FATAL_ERROR "Cannot concatenate files")
 ENDIF()
 
-# Build mysql_fix_privilege_tables.c
+# Build mysql_fix_privilege_tables.h
 ADD_CUSTOM_COMMAND(
-  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/mysql_fix_privilege_tables_sql.c
+  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/mysql_fix_privilege_tables_sql.h
   ${CAT_COMMAND}
   COMMAND comp_sql
   mysql_fix_privilege_tables
   mysql_fix_privilege_tables.sql
-  mysql_fix_privilege_tables_sql.c
+  mysql_fix_privilege_tables_sql.h
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
   DEPENDS comp_sql
   ${CMAKE_CURRENT_SOURCE_DIR}/mysql_system_tables.sql
@@ -97,7 +93,7 @@ ADD_CUSTOM_COMMAND(
 # Add target for the above to be built
 ADD_CUSTOM_TARGET(GenFixPrivs
   ALL
-  DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/mysql_fix_privilege_tables_sql.c
+  DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/mysql_fix_privilege_tables_sql.h
   ${CMAKE_CURRENT_BINARY_DIR}/sql_commands_sys_schema.h
 )
 
@@ -192,6 +188,17 @@ ADD_CUSTOM_COMMAND(
   ${CMAKE_CURRENT_SOURCE_DIR}/fill_help_tables.sql
 )
 
+ADD_CUSTOM_COMMAND(
+  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/sql_commands_ndb_privileges.h
+  COMMAND comp_sql
+  ndb_upgrade_privileges
+  ${CMAKE_CURRENT_SOURCE_DIR}/ndb_upgrade_privileges.sql
+  sql_commands_ndb_privileges.h
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+  DEPENDS comp_sql
+  ${CMAKE_CURRENT_SOURCE_DIR}/ndb_upgrade_privileges.sql
+)
+
 # Add target for the above to be built
 IF(NOT WITHOUT_SERVER)
   ADD_CUSTOM_TARGET(GenBootstrapPriv
@@ -201,6 +208,7 @@ IF(NOT WITHOUT_SERVER)
     ${CMAKE_CURRENT_BINARY_DIR}/sql_commands_system_users.h
     ${CMAKE_CURRENT_BINARY_DIR}/sql_commands_help_data.h
     ${CMAKE_CURRENT_BINARY_DIR}/sql_commands_system_tables_data_fix.h
+    ${CMAKE_CURRENT_BINARY_DIR}/sql_commands_ndb_privileges.h
   )
 ENDIF()
 
@@ -261,7 +269,7 @@ IF(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   STRING(REGEX REPLACE "-std=c..[0-9]+" "" CXXFLAGS "${CXXFLAGS}")
 ENDIF()
 
-IF(CMAKE_SYSTEM_NAME MATCHES "FreeBSD")
+IF(FREEBSD)
   SET (PERL_PATH "/usr/local/bin/perl")
 ELSE()
   SET (PERL_PATH "/usr/bin/perl")
@@ -269,73 +277,64 @@ ENDIF()
 
 IF(UNIX)
   # SHELL_PATH, FIND_PROC, CHECK_PID are used by mysqld_safe
-IF(CMAKE_SYSTEM_NAME MATCHES "SunOS")
-  SET (SHELL_PATH "/bin/bash")
-ELSE()
-  SET (SHELL_PATH "/bin/sh")
-ENDIF()
-
-IF(CMAKE_SYSTEM_NAME MATCHES "Linux")
-  SET (FIND_PROC
-    "ps wwwp $PID | grep -v mysqld_safe | grep -- $MYSQLD > /dev/null")
-ENDIF()
-IF(NOT FIND_PROC AND CMAKE_SYSTEM_NAME MATCHES "SunOS")
-  SET (FIND_PROC
-    "ps -p $PID | grep -v mysqld_safe | grep -- $MYSQLD > /dev/null")
-ENDIF()
-
-IF(NOT FIND_PROC)
-  # BSD styl
-  EXECUTE_PROCESS(COMMAND ps -uaxww OUTPUT_QUIET ERROR_QUIET RESULT_VARIABLE result)
-  IF(result MATCHES 0)
-     SET( FIND_PROC
-       "ps -uaxww | grep -v mysqld_safe | grep -- $MYSQLD | grep $PID > /dev/null")
+  IF(SOLARIS)
+    SET (SHELL_PATH "/bin/bash")
+  ELSE()
+    SET (SHELL_PATH "/bin/sh")
   ENDIF()
-ENDIF()
 
-IF(NOT FIND_PROC)
-  # SysV style
-  EXECUTE_PROCESS(COMMAND ps -ef OUTPUT_QUIET ERROR_QUIET RESULT_VARIABLE result)
-  IF(result MATCHES 0)
-    SET( FIND_PROC "ps -ef | grep -v mysqld_safe | grep -- $MYSQLD | grep $PID > /dev/null")
+  IF(LINUX)
+    SET (FIND_PROC
+      "ps wwwp $PID | grep -v mysqld_safe | grep -- $MYSQLD > /dev/null")
   ENDIF()
-ENDIF()
+  IF(SOLARIS)
+    SET (FIND_PROC
+      "ps -p $PID | grep -v mysqld_safe | grep -- $MYSQLD > /dev/null")
+  ENDIF()
 
-EXECUTE_PROCESS(COMMAND sh -c "kill -0 $$" OUTPUT_QUIET ERROR_QUIET RESULT_VARIABLE result)
-IF(result MATCHES 0)
-  SET(CHECK_PID "kill -0 $PID > /dev/null 2> /dev/null")
-ELSE()
-  SET(CHECK_PID "kill -s SIGCONT $PID  > /dev/null 2> /dev/null")
-ENDIF()
+  IF(NOT FIND_PROC)
+    # BSD style
+    EXECUTE_PROCESS(COMMAND ps -uaxww
+      OUTPUT_QUIET ERROR_QUIET RESULT_VARIABLE result)
+    IF(result MATCHES 0)
+      SET( FIND_PROC
+        "ps -uaxww | grep -v mysqld_safe | grep -- $MYSQLD | grep $PID > /dev/null")
+    ENDIF()
+  ENDIF()
 
-SET(HOSTNAME "hostname")
-SET(MYSQLD_USER "mysql")
+  IF(NOT FIND_PROC)
+    # SysV style
+    EXECUTE_PROCESS(COMMAND ps -ef
+      OUTPUT_QUIET ERROR_QUIET RESULT_VARIABLE result)
+    IF(result MATCHES 0)
+      SET( FIND_PROC "ps -ef | grep -v mysqld_safe | grep -- $MYSQLD | grep $PID > /dev/null")
+    ENDIF()
+  ENDIF()
+
+  EXECUTE_PROCESS(COMMAND sh -c "kill -0 $$"
+    OUTPUT_QUIET ERROR_QUIET RESULT_VARIABLE result)
+  IF(result MATCHES 0)
+    SET(CHECK_PID "kill -0 $PID > /dev/null 2> /dev/null")
+  ELSE()
+    SET(CHECK_PID "kill -s SIGCONT $PID  > /dev/null 2> /dev/null")
+  ENDIF()
+
+  SET(MYSQLD_USER "mysql")
 
 ENDIF(UNIX)
-
-SET(bindir ${prefix}/${INSTALL_BINDIR})
-SET(sbindir ${prefix}/${INSTALL_SBINDIR})
-SET(libexecdir ${prefix}/${INSTALL_SBINDIR})
-SET(pkgdatadir ${prefix}/${INSTALL_MYSQLSHAREDIR})
-IF(INSTALL_LAYOUT MATCHES "STANDALONE")
-  SET(localstatedir ${prefix}/data)
-ELSE()
-  SET(localstatedir ${MYSQL_DATADIR})
-ENDIF()
 
 SET(prefix "${CMAKE_INSTALL_PREFIX}")
 SET(sysconfdir ${prefix})
 SET(bindir ${prefix}/${INSTALL_BINDIR})
 SET(libexecdir ${prefix}/${INSTALL_SBINDIR})
 SET(datadir ${prefix}/${INSTALL_MYSQLSHAREDIR})
-SET(pkgdatadir ${prefix}/${INSTALL_MYSQLSHAREDIR})
 SET(libsubdir  ${INSTALL_LIBDIR})
 SET(pkgincludedir ${prefix}/${INSTALL_INCLUDEDIR})
 SET(pkglibdir ${prefix}/${INSTALL_LIBDIR})
 SET(pkgplugindir ${prefix}/${INSTALL_PLUGINDIR})
 SET(localstatedir ${MYSQL_DATADIR})
 
-IF(CMAKE_SYSTEM_NAME STREQUAL "SunOS")
+IF(SOLARIS)
   SET(RPATH_OPTION " -R$pkglibdir")
 ENDIF()
 
@@ -345,7 +344,7 @@ IF(LINUX_INSTALL_RPATH_ORIGIN)
 ENDIF()
 
 # some scripts use  @TARGET_LINUX@
-IF(CMAKE_SYSTEM_NAME MATCHES "Linux")
+IF(LINUX)
   SET(TARGET_LINUX "true")
 ELSE()
   SET(TARGET_LINUX "false")
@@ -366,6 +365,8 @@ MACRO(EXTRACT_LINK_LIBRARIES target var)
       # Filter out "general", it is not a library, just CMake hint
       IF(NOT lib STREQUAL "general" AND NOT ${var}  MATCHES "-l${lib} ")
         IF (lib MATCHES "^\\-l")
+          SET(${var} "${${var}} ${lib} ")
+        ELSEIF (lib MATCHES "^\\-L")
           SET(${var} "${${var}} ${lib} ")
         ELSEIF(lib MATCHES "^/")
           # Full path, convert to just filename, strip "lib" prefix and extension
@@ -402,7 +403,7 @@ SET(CONFIG_REQUIRES_PRIVATE "")
 IF (WITH_SSL STREQUAL "system")
   # We have implemented "system" for other platforms as well, but those
   # are non-native packages.
-  IF(LINUX OR SOLARIS OR CMAKE_SYSTEM_NAME MATCHES "FreeBSD")
+  IF(LINUX OR SOLARIS OR FREEBSD)
     SET(CONFIG_REQUIRES_PRIVATE "openssl")
     STRING(REPLACE "-lssl" "" CONFIG_LIBS_PRIVATE "${CONFIG_LIBS_PRIVATE}")
     STRING(REPLACE "-lcrypto" "" CONFIG_LIBS_PRIVATE "${CONFIG_LIBS_PRIVATE}")

@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2013, 2018, Oracle and/or its affiliates. All rights reserved.
+  Copyright (c) 2013, 2019, Oracle and/or its affiliates. All rights reserved.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -129,7 +129,7 @@ Plugin_table table_replication_group_members::m_table_def(
     /* Definition */
     "  CHANNEL_NAME CHAR(64) not null,\n"
     "  MEMBER_ID CHAR(36) collate utf8mb4_bin not null,\n"
-    "  MEMBER_HOST CHAR(60) collate utf8mb4_bin not null,\n"
+    "  MEMBER_HOST CHAR(255) CHARACTER SET ASCII not null,\n"
     "  MEMBER_PORT INTEGER,\n"
     "  MEMBER_STATE CHAR(64) collate utf8mb4_bin not null,\n"
     "  MEMBER_ROLE CHAR(64) collate utf8mb4_bin not null,\n"

@@ -1,4 +1,4 @@
-# Copyright (c) 2006, 2018, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2006, 2019, Oracle and/or its affiliates. All rights reserved.
 # 
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
@@ -162,6 +162,19 @@ CACHE INTERNAL "Undocumented functions exported by client API"
 
 )
 
+# Below list will have all nonblocking C APIs
+SET (CLIENT_API_NONBLOCKING_FUNCTIONS
+mysql_real_connect_nonblocking
+mysql_send_query_nonblocking
+mysql_real_query_nonblocking
+mysql_store_result_nonblocking
+mysql_next_result_nonblocking
+mysql_fetch_row_nonblocking
+mysql_free_result_nonblocking
+
+CACHE INTERNAL "Nonblocking functions exported by client API"
+)
+
 SET(CLIENT_SOURCES
   libmysql.cc
   errmsg.cc
@@ -174,11 +187,10 @@ SET(CLIENT_SOURCES
   ../sql/auth/sha2_password_common.cc
 )
 
-INCLUDE(${MYSQL_CMAKE_SCRIPT_DIR}/compile_flags.cmake)
 IF (WIN32 AND OPENSSL_APPLINK_C)
-  ADD_COMPILE_FLAGS(
+  ADD_COMPILE_DEFINITIONS(
     ../sql-common/client_authentication.cc
-    COMPILE_FLAGS -DHAVE_OPENSSL_APPLINK_C
+    COMPILE_DEFINITIONS HAVE_OPENSSL_APPLINK_C
   )
 ENDIF()
 
@@ -199,11 +211,10 @@ IF (WITH_CLIENT_PROTOCOL_TRACING)
 
 ENDIF (WITH_CLIENT_PROTOCOL_TRACING)
 
-ADD_CONVENIENCE_LIBRARY(clientlib ${CLIENT_SOURCES})
-ADD_DEPENDENCIES(clientlib GenError)
+ADD_CONVENIENCE_LIBRARY(clientlib ${CLIENT_SOURCES} DEPENDENCIES GenError)
 
 SET(LIBS_TO_MERGE
-  clientlib dbug strings vio mysys mysys_ssl
+  clientlib dbug mytime strings vio mysys
   )
 SET(LIBS_TO_LINK ${LIBDL})
 
@@ -216,12 +227,7 @@ ENDIF()
 IF(WITH_SSL STREQUAL "wolfssl")
   LIST(APPEND LIBS_TO_MERGE wolfssl wolfcrypt)
 ELSE()
-  IF(WIN32)
-    # SSL_LIBRARIES are IMPORTED, and must be merged.
-    LIST(APPEND LIBS_TO_MERGE ${SSL_LIBRARIES})
-  ELSE()
-    LIST(APPEND LIBS_TO_LINK ${SSL_LIBRARIES})
-  ENDIF()
+  LIST(APPEND LIBS_TO_LINK ${SSL_LIBRARIES})
 ENDIF()
 
 #
@@ -249,7 +255,6 @@ IF(MSVC)
   INSTALL_DEBUG_TARGET(auth_win_client DESTINATION ${INSTALL_LIBDIR}/debug)
   INSTALL_DEBUG_TARGET(clientlib DESTINATION ${INSTALL_LIBDIR}/debug)
   INSTALL_DEBUG_TARGET(mysys DESTINATION ${INSTALL_LIBDIR}/debug)
-  INSTALL_DEBUG_TARGET(mysys_ssl DESTINATION ${INSTALL_LIBDIR}/debug)
   INSTALL_DEBUG_TARGET(strings DESTINATION ${INSTALL_LIBDIR}/debug)
   INSTALL_DEBUG_TARGET(vio DESTINATION ${INSTALL_LIBDIR}/debug)
   IF(WITH_SSL STREQUAL "wolfssl")
@@ -279,7 +284,7 @@ IF(NOT DISABLE_SHARED)
   # Merge several convenience libraries into one big mysqlclient
   # and link them together into shared library.
   MERGE_LIBRARIES_SHARED(libmysql ${LIBS_TO_MERGE}
-    EXPORTS ${CLIENT_API_FUNCTIONS} ${CLIENT_API_FUNCTIONS_UNDOCUMENTED}
+    EXPORTS ${CLIENT_API_FUNCTIONS} ${CLIENT_API_FUNCTIONS_UNDOCUMENTED} ${CLIENT_API_NONBLOCKING_FUNCTIONS}
     COMPONENT SharedLibraries)
   TARGET_LINK_LIBRARIES(libmysql PRIVATE ${LIBS_TO_LINK})
 
@@ -293,7 +298,7 @@ IF(NOT DISABLE_SHARED)
   ENDIF()
   IF(UNIX)
     # libtool compatability
-    IF(CMAKE_SYSTEM_NAME MATCHES "FreeBSD" OR APPLE)
+    IF(FREEBSD OR APPLE)
       SET(OS_SHARED_LIB_VERSION "${SHARED_LIB_MAJOR_VERSION}")
     ELSE()
       SET(OS_SHARED_LIB_VERSION
@@ -341,6 +346,9 @@ SET(CLIENT_API_FUNCTION_LIST "")
 FOREACH(api ${CLIENT_API_FUNCTIONS})
   SET(CLIENT_API_FUNCTION_LIST "${CLIENT_API_FUNCTION_LIST} ${api},")
 ENDFOREACH()
+FOREACH(api ${CLIENT_API_NONBLOCKING_FUNCTIONS})
+  SET(CLIENT_API_FUNCTION_LIST "${CLIENT_API_FUNCTION_LIST} ${api},")
+ENDFOREACH()
 
 #
 # Generate api_test.c source, substituting @CLIENT_API_FUNCTION_LIST@
@@ -355,7 +363,9 @@ CONFIGURE_FILE(api_test.c.in ${CMAKE_CURRENT_BINARY_DIR}/api_test.c)
 #
 MYSQL_ADD_EXECUTABLE(libmysql_api_test
   ${CMAKE_CURRENT_BINARY_DIR}/api_test.c SKIP_INSTALL)
+# Clang/UBSAN needs this on some platforms.
 SET_TARGET_PROPERTIES(libmysql_api_test PROPERTIES LINKER_LANGUAGE CXX)
+
 IF(LIBRT)
   TARGET_LINK_LIBRARIES(libmysql_api_test ${LIBRT})
 ENDIF()

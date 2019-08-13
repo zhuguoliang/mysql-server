@@ -1,4 +1,4 @@
-/* Copyright (c) 2013, 2018, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2013, 2019, Oracle and/or its affiliates. All rights reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -26,7 +26,7 @@
 #include <stddef.h>
 #include <sys/types.h>
 
-#include "binary_log_types.h"
+#include "field_types.h"  // enum_field_types
 #include "lex_string.h"
 #include "m_ctype.h"
 #include "m_string.h"
@@ -54,7 +54,6 @@
 #include "sql/sql_error.h"
 #include "sql/sql_lex.h"
 #include "sql/sql_list.h"
-#include "sql/sql_parse.h"  // negate_expression
 #include "sql/system_variables.h"
 #include "sql_string.h"
 
@@ -76,21 +75,17 @@ class PTI_table_wild : public Parse_tree_item {
   virtual bool itemize(Parse_context *pc, Item **item);
 };
 
-class PTI_negate_expression : public Parse_tree_item {
+class PTI_truth_transform : public Parse_tree_item {
   typedef Parse_tree_item super;
 
   Item *expr;
+  Bool_test truth_test;
 
  public:
-  PTI_negate_expression(const POS &pos, Item *expr_arg)
-      : super(pos), expr(expr_arg) {}
+  PTI_truth_transform(const POS &pos, Item *expr_arg, Bool_test truth_test)
+      : super(pos), expr(expr_arg), truth_test(truth_test) {}
 
-  virtual bool itemize(Parse_context *pc, Item **res) {
-    if (super::itemize(pc, res) || expr->itemize(pc, &expr)) return true;
-
-    *res = negate_expression(pc, expr);
-    return *res == NULL;
-  }
+  virtual bool itemize(Parse_context *pc, Item **res);
 };
 
 class PTI_comp_op : public Parse_tree_item {
@@ -322,8 +317,8 @@ class PTI_text_literal_text_string : public PTI_text_literal {
 
  public:
   PTI_text_literal_text_string(const POS &pos, bool is_7bit_arg,
-                               const LEX_STRING &literal)
-      : super(pos, is_7bit_arg, literal) {}
+                               const LEX_STRING &literal_arg)
+      : super(pos, is_7bit_arg, literal_arg) {}
 
   virtual bool itemize(Parse_context *pc, Item **res) {
     if (super::itemize(pc, res)) return true;
@@ -354,8 +349,8 @@ class PTI_text_literal_nchar_string : public PTI_text_literal {
 
  public:
   PTI_text_literal_nchar_string(const POS &pos, bool is_7bit_arg,
-                                const LEX_STRING &literal)
-      : super(pos, is_7bit_arg, literal) {}
+                                const LEX_STRING &literal_arg)
+      : super(pos, is_7bit_arg, literal_arg) {}
 
   virtual bool itemize(Parse_context *pc, Item **res);
 };
@@ -368,8 +363,8 @@ class PTI_text_literal_underscore_charset : public PTI_text_literal {
  public:
   PTI_text_literal_underscore_charset(const POS &pos, bool is_7bit_arg,
                                       const CHARSET_INFO *cs_arg,
-                                      const LEX_STRING &literal)
-      : super(pos, is_7bit_arg, literal), cs(cs_arg) {}
+                                      const LEX_STRING &literal_arg)
+      : super(pos, is_7bit_arg, literal_arg), cs(cs_arg) {}
 
   virtual bool itemize(Parse_context *pc, Item **res) {
     if (super::itemize(pc, res)) return true;
@@ -818,11 +813,15 @@ class PTI_context : public Parse_tree_item {
 
     if (expr->itemize(pc, &expr)) return true;
 
+    if (!expr->is_bool_func()) {
+      expr = make_condition(pc, expr);
+      if (expr == nullptr) return true;
+    }
     // Ensure we're resetting parsing place of the right select
     DBUG_ASSERT(pc->select->parsing_place == Context);
     pc->select->parsing_place = CTX_NONE;
     DBUG_ASSERT(expr != NULL);
-    expr->top_level_item();
+    expr->apply_is_true();
 
     *res = expr;
     return false;
