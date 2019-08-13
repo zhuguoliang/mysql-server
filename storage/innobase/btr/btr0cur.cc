@@ -848,6 +848,11 @@ void btr_cur_search_to_nth_level(
   // 并没有这里判断是x lock 还是sx lock 的过程
   switch (latch_mode) {
     case BTR_MODIFY_TREE:
+      // 这里会判断给这个table 加x lock 还是sx lock
+      // 如果当前rollback segment history list 比较长, 也就是purge
+      // 工作比较忙的时候, 那么就退化成5.6 实现,
+      // 上来就直接给btree 加一个x lock
+      // 否则就加sx lock
       /* Most of delete-intended operations are purging.
       Free blocks and read IO bandwidth should be prior
       for them, when the history list is glowing huge. */
@@ -905,7 +910,13 @@ void btr_cur_search_to_nth_level(
         upper_rw_latch = RW_NO_LATCH;
       }
   }
-  // 确定根节点的latch 类型
+  // 确认root page 的lock 类型, 这里root page 的其实是一个特殊的page,
+  // 和其他的page 不一样地方在于, root page 的lock 基本就是和btree table lock
+  // 是一样的了, 但是他又没有sx lock
+  // 所以如果是不会修改btree 的search 就给这个root page s lock
+  // 否则是x lock
+  // 如果这个latch_mode 不加锁, 那么这个root page 也就不加锁
+  //
   // 下面的写法是用非递归实现遍历的写法, 不断跳到search_loop 进行循环的过程
   // 每次进来都会执行 page_cur_search_with_match 去当前这个level 的page
   // 里面进行查找, 然后获得下一个level 的page 继续查找
@@ -992,11 +1003,18 @@ search_loop:
       /* Try to buffer the operation if the leaf
       page is not in the buffer pool. */
 
+      // 如果这是一个delete 操作的话, 那么优先考虑使用ibuf
+      // 因此从buffer pool 取page 的时候会设置只有page 在buffer pool
+      // 的时候才取出, 否则也不会去做读取磁盘的操作
       fetch = btr_op == BTR_DELETE_OP ? Page_fetch::IF_IN_POOL_OR_WATCH
                                       : Page_fetch::IF_IN_POOL;
     }
   }
 
+  // 之所以需要retry_page_get 是因为有可能写入到ibuf, 但是写入ibuf 有可能失败
+  // 第一次从buffer pool 获得数据的时候使用的是 BUF_GET_IF_IN_POOL 或者BUF_GET_IF_IN_POOL_OR_WATCH
+  // 但是如果insert Ibuf 失败了, 那就只能使用BUF_GET 来获得这个page 了,
+  // 就算有磁盘IO 也是必须的了
 retry_page_get:
   ut_ad(n_blocks < BTR_MAX_LEVELS);
   // 把当前遍历tree 的点记录下来, 这里n_blocks 是和btree 的高度绑定的,
@@ -1073,6 +1091,8 @@ retry_page_get:
     /* Insert to the insert/delete buffer did not succeed, we
     must read the page from disk. */
 
+    // 这里先尝试从ibuf 里面插入, 或者删除, 这样就不需要把page
+    // 从磁盘读取出来再写入进去. 但是如果ibuf 满了, 那就只能从page 里面读出来了
     fetch = cursor->m_fetch_mode;
 
     goto retry_page_get;
@@ -1153,6 +1173,7 @@ retry_page_get:
     /* We are in the root node */
 
     height = btr_page_get_level(page, mtr);
+    // 第一次进来的时候把 height 设置成这个btree 的height
     root_height = height;
     cursor->tree_height = root_height + 1;
 
@@ -1205,7 +1226,7 @@ retry_page_get:
           /* Release the tree s-latch */
           /* NOTE: BTR_MODIFY_EXTERNAL
           needs to keep tree sx-latch */
-          // 把在savepoint 上的latch 释放掉
+          // 把在savepoint 上的整个btree 的 table latch 释放掉
           mtr_release_s_latch_at_savepoint(mtr, savepoint,
                                            dict_index_get_lock(index));
         }
@@ -1306,6 +1327,7 @@ retry_page_get:
     }
   } else if (height == 0 && btr_search_enabled &&
              !dict_index_is_spatial(index)) {
+    // 使用adaptive hash index 并且是leaf node, 并且不是rtree 走这个branch
     /* The adaptive hash index is only used when searching
     for leaf pages (height==0), but not in r-trees.
     We only need the byte prefix comparison for the purpose
@@ -1315,6 +1337,9 @@ retry_page_get:
                                      page_cursor);
   } else {
     /* Search for complete index fields. */
+    // 最正常情况这这个branch, 非adaptive, 非rtree
+    // 这里是在一个page 里面找一个record 的过程
+    // 到这里之前已经把这个page 的latch 都latch 住了
     up_bytes = low_bytes = 0;
     page_cur_search_with_match(block, index, tuple, page_mode, &up_match,
                                &low_match, page_cursor,
@@ -1375,18 +1400,22 @@ retry_page_get:
     pessimistic delete intention, it might cause node_ptr insert
     for the upper level. We should change the intention and retry.
     */
+    // TODO(baotiao): https://bugs.mysql.com/bug.php?id=74209
+    // 为什么这里需要check opposite_intention?
     if (latch_mode == BTR_MODIFY_TREE &&
         btr_cur_need_opposite_intention(page, lock_intention, node_ptr)) {
     need_opposite_intention:
       // TODO(baotiao): 这里为什么upper_rw_latch 必须是RW_X_LATCH?
       ut_ad(upper_rw_latch == RW_X_LATCH);
 
+      // 把root 节点的block 释放掉
       if (n_releases > 0) {
         /* release root block */
         mtr_release_block_at_savepoint(mtr, tree_savepoints[0], tree_blocks[0]);
       }
 
       /* release all blocks */
+      // 把这条路径上访问过的block reference - 1
       for (; n_releases <= n_blocks; n_releases++) {
         mtr_release_block_at_savepoint(mtr, tree_savepoints[n_releases],
                                        tree_blocks[n_releases]);
@@ -1525,6 +1554,7 @@ retry_page_get:
       // 这里看到, 只要不修改btree 结构, 那么就把上层的block 给释放掉
       // root page 是不会释放的, root page 一直保留sx lock
       // 把除了root 节点以后的中间branch lock 都 release
+      // 同时把这个page reference - 1
       for (; n_releases < n_blocks; n_releases++) {
         if (n_releases == 0) {
           /* we should not release root page
