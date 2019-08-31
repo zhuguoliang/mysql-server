@@ -636,6 +636,9 @@ btr_latch_leaves_t btr_cur_latch_leaves(buf_block_t *block,
 
 /** In the pessimistic delete, if the page data size drops below this
 limit, merging it to a neighbor is tried */
+// 默认的merge_threshold = 50
+// 因此这里的limit 就是16k * 50 / 100
+// 也就是
 #define BTR_CUR_PAGE_COMPRESS_LIMIT(index) \
   ((UNIV_PAGE_SIZE * (ulint)((index)->merge_threshold)) / 100)
 

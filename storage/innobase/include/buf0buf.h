@@ -1256,6 +1256,8 @@ class buf_page_t {
   this block, zero if not
   modified. Protected by block
   mutex */
+  // 这个 buf_page_t 第一次修改时候的lsn
+  // 如果这个page 被flush 到disk 了, 那么这个值会被设置成0
   lsn_t oldest_modification;
   /*!< log sequence number of
   the START of the log entry

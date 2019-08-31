@@ -1057,6 +1057,8 @@ bool buf_LRU_scan_and_free_block(buf_pool_t *buf_pool, bool scan_all) {
 
   mutex_enter(&buf_pool->LRU_list_mutex);
 
+  // 如果使用了 unzip_list 则从 unzip_list 上获取free page
+  // 不过大多数时候我们不适用 unzip_list
   if (use_unzip_list) {
     freed = buf_LRU_free_from_unzip_LRU_list(buf_pool, scan_all);
   }
@@ -1239,6 +1241,8 @@ buf_block_t *buf_LRU_get_free_block(buf_pool_t *buf_pool) {
 loop:
   buf_LRU_check_size_of_non_data_objects(buf_pool);
 
+  // Step 1. 这里第一步从free list 上去获取free page
+  // 如果没有则进入从LRU list 上释放一个free page, 并加入到free list 的过程
   /* If there is a block in the free list, take it */
   block = buf_LRU_get_free_only(buf_pool);
 
@@ -1264,6 +1268,11 @@ loop:
     If we are doing for the first time we'll scan only
     tail of the LRU list otherwise we scan the whole LRU
     list. */
+    // Step 2. 从LRU list 上free 一个page, 并加入到free list
+    // 这里第0 次的时候, scan_all = false, 后续scan_all 都是等于true
+    // 也就是第0 次的时候, 从LRU 上找可以replace 的free page 的时候, 只会
+    // 扫描 BUF_LRU_SEARCH_SCAN_THRESHOLD = 100 的元素个数, 并不会把整个LRU list
+    // 都扫描
     freed = buf_LRU_scan_and_free_block(buf_pool, n_iterations > 0);
 
     if (!freed && n_iterations == 0) {
@@ -1276,10 +1285,16 @@ loop:
     }
   }
 
+  // Step 3. 找到了free page, 并已经加入到了free list, 那么跳到Step 1.
+  // 就可以给上层返回一个free page 了
   if (freed) {
     goto loop;
   }
 
+  // Step 4. 如果已经尝试了 20 次从LRU list 里面去释放page,(注意: 这里从LRU List
+  // 上释放page, 并不会去执行flush page操作, 只会把没有被modify 的page
+  // 给释放掉而已) 但是还是没有
+  // 那么打印日志, 尝试从flush list 上去flush page
   if (n_iterations > 20 && srv_buf_pool_old_size == srv_buf_pool_size) {
     ib::warn(ER_IB_MSG_134)
         << "Difficult to find free blocks in the buffer pool"
@@ -1314,6 +1329,8 @@ loop:
     os_event_set(buf_flush_event);
   }
 
+  // 这里除了第0 和 1 次, 后续在走这个loop 的时候, 都需要sleep 10ms
+  // 避免无谓的查找, 浪费cpu
   if (n_iterations > 1) {
     MONITOR_INC(MONITOR_LRU_GET_FREE_WAITS);
     os_thread_sleep(10000);
@@ -1330,6 +1347,9 @@ loop:
   involved (particularly in case of compressed pages). We
   can do that in a separate patch sometime in future. */
 
+  // 在上层尝试replace 找到一个free page 依然失败以后, 那么只能尝试从LRU list
+  // 里面将一个page 给flush 来腾出free page 的空间了
+  // 那么什么时候从LRU list 上面flush 一个page 的时候会失败呢?
   if (!buf_flush_single_page_from_LRU(buf_pool)) {
     MONITOR_INC(MONITOR_LRU_SINGLE_FLUSH_FAILURE_COUNT);
     ++flush_failures;

@@ -526,6 +526,7 @@ static bool btr_cur_will_modify_tree(dict_index_t *index, const page_t *page,
     /* NOTE: call mach_read_from_4() directly to avoid assertion
     failure. It is safe because we already have SX latch of the
     index tree */
+    // 如果当前page 实际
     if (page_get_data_size(page) <
             margin + BTR_CUR_PAGE_COMPRESS_LIMIT(index) ||
         (mach_read_from_4(page + FIL_PAGE_NEXT) == FIL_NULL &&
@@ -549,6 +550,9 @@ static bool btr_cur_will_modify_tree(dict_index_t *index, const page_t *page,
     for page directory already */
     ulint max_size = page_get_max_insert_size_after_reorganize(page, 2);
 
+    // max_size 是当前这个page 还剩余的空间
+    // 这里剩余空间是减去 page directory 的, 这里算空余size
+    // 的时候会算上2个record 的大小, 因此可能触发split and insert 操作
     if (max_size < BTR_CUR_PAGE_REORGANIZE_LIMIT + rec_size ||
         max_size < rec_size * 2) {
       return (true);
@@ -577,7 +581,7 @@ to the intention.
 @param[in]	rec		record (current node_ptr)
 @return	true if tree modification is needed */
 // 判断这次操作是否有影响btree 结构
-// 所以这里判断如实这次操作是delete, 
+// 所以这里判断如果这次操作是delete, 
 // 并且这个记录是这个page 的第一个元素, 并且prev_page 非空,
 // 或者这个记录是这个page 的最后一个元素, 并且next_page 非空
 // 那么这个操作是要修改btree 结构的
@@ -846,9 +850,9 @@ void btr_cur_search_to_nth_level(
   switch (latch_mode) {
     case BTR_MODIFY_TREE:
       // 这里会判断给这个table 加x lock 还是sx lock
-      // 如果当前rollback segment history list 比较长, 也就是purge
-      // 工作比较忙的时候, 那么就退化成5.6 实现,
-      // 上来就直接给btree 加一个x lock
+      // 如果当前lock_intention 是 delete, 并且rollback segment history list 比较长, 
+      // 也就是purge 工作比较忙的时候, 那么就退化成5.6 实现,
+      // 上来就直接给btree 加一个x lock, 那么read 操作就无法进行了
       // 否则就加sx lock
       /* Most of delete-intended operations are purging.
       Free blocks and read IO bandwidth should be prior
@@ -1218,6 +1222,7 @@ retry_page_get:
       case BTR_MODIFY_TREE:
       case BTR_CONT_MODIFY_TREE:
       case BTR_CONT_SEARCH_TREE:
+        // 为何这3种latch mode 不需要把savepoint 上的btree 的table latch 释放掉
         break;
       default:
         if (!s_latch_by_caller && !srv_read_only_mode && !modify_external) {
@@ -1404,6 +1409,7 @@ retry_page_get:
         btr_cur_need_opposite_intention(page, lock_intention, node_ptr)) {
     need_opposite_intention:
       // TODO(baotiao): 这里为什么upper_rw_latch 必须是RW_X_LATCH?
+      // 因为latch_mode 是BTR_MODIFY_TREE 的时候 upper_rw_latch 一直是RW_X_LATCH
       ut_ad(upper_rw_latch == RW_X_LATCH);
 
       // 把root 节点的block 释放掉
@@ -1494,6 +1500,10 @@ retry_page_get:
     the another page might be choosen when BTR_CONT_MODIFY_TREE.
     So, the parent page should not released to avoiding deadlock
     with blocking the another search with the same key value. */
+
+    // detected_same_key_root 用来记录非唯一索引时, 如果当前node_ptr
+    // 指向的记录是第一个或者最后一个匹配的, 则设置为true
+    // 也就是索引不唯一的时候, 指向的第一个就其实是和第一个相等的都算第一个
     if (!detected_same_key_root && lock_intention == BTR_INTENTION_BOTH &&
         !dict_index_is_unique(index) && latch_mode == BTR_MODIFY_TREE &&
         (up_match >= rec_offs_n_fields(offsets) - 1 ||

@@ -673,6 +673,13 @@ ibool buf_flush_ready_for_replace(buf_page_t *bpage) {
   ut_ad(mutex_own(buf_page_get_mutex(bpage)));
   ut_ad(bpage->in_LRU_list);
 
+  // 这里判断一个page 是否能够被replace, 也就是被释放的方法
+  // 如果这个page 是被写过, 那么oldest_modification == 0, 表示这个page
+  // 已经被flush 到磁盘了.
+  // bpage->buf_fix_count 表示的是记录这个bpage 被引用次数, 每次访问bpage,
+  // 都对引用计数buf_fix_count + 1, 释放的时候 -1. 也就是这个bpage 被释放以后,
+  // 才可以被replace
+  // 并且这个page 的io_fix 状态是 BUF_IO_NONE, 表示的是page 要从LRU list 中删除
   if (buf_page_in_file(bpage)) {
     return (bpage->oldest_modification == 0 && bpage->buf_fix_count == 0 &&
             buf_page_get_io_fix(bpage) == BUF_IO_NONE);
@@ -703,6 +710,10 @@ bool buf_flush_ready_for_flush(buf_page_t *bpage, buf_flush_t flush_type) {
         (flush_type == BUF_FLUSH_LIST && buf_flush_list_mutex_own(buf_pool)));
   ut_ad(flush_type < BUF_FLUSH_N_TYPES);
 
+  // 如果oldest_modification == 0 说明这个page 没有被修改或者这个page 修改但是
+  // 已经被flush 过了
+  //
+  // 如果buf_io_fix != BUF_IO_NONE 说明这个page 还在被使用, 因此不能被flush
   if (bpage->oldest_modification == 0 ||
       buf_page_get_io_fix_unlocked(bpage) != BUF_IO_NONE) {
     return (false);
@@ -2188,6 +2199,9 @@ bool buf_flush_single_page_from_LRU(buf_pool_t *buf_pool) {
 
     mutex_enter(block_mutex);
 
+    // 这里可以看到, 先判断能否replace, 也就是这个page 可以直接从LRU list
+    // 上剔除掉, 不需要执行flush 操作
+    // 如果没办法replace 才执行 single flush 操作
     if (buf_flush_ready_for_replace(bpage)) {
       /* block is ready for eviction i.e., it is
       clean and is not IO-fixed or buffer fixed. */
@@ -2199,6 +2213,7 @@ bool buf_flush_single_page_from_LRU(buf_pool_t *buf_pool) {
         mutex_exit(block_mutex);
       }
 
+      // 如果这个page 无法replace, 那么只能执行flush 了
     } else if (buf_flush_ready_for_flush(bpage, BUF_FLUSH_SINGLE_PAGE)) {
       /* Block is ready for flush. Try and dispatch an IO
       request. We'll put it on free list in IO completion
@@ -2208,6 +2223,7 @@ bool buf_flush_single_page_from_LRU(buf_pool_t *buf_pool) {
       Note: There is no guarantee that this page has actually
       been freed, only that it has been flushed to disk */
 
+      // 如果确实找到了一个page 可以flush, 那就执行flush 操作
       freed = buf_flush_page(buf_pool, bpage, BUF_FLUSH_SINGLE_PAGE, true);
 
       if (freed) {
