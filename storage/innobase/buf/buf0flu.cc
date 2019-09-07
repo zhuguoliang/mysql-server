@@ -1496,6 +1496,8 @@ static ulint buf_flush_try_neighbors(const page_id_t &page_id,
 
     page_no_t buf_flush_area;
 
+    // 所以这里的flush neighbor 策略是考虑random_read_ahead 的时候可能将整个extent
+    // 的数据都一起读取进来, 因此这里flush 的时候可以一起flush 掉
     buf_flush_area = std::min(BUF_READ_AHEAD_AREA(buf_pool),
                               static_cast<page_no_t>(buf_pool->curr_size / 16));
 
@@ -1779,8 +1781,13 @@ static ulint buf_flush_LRU_list_batch(buf_pool_t *buf_pool, ulint max) {
 
     BPageMutex *block_mutex = buf_page_get_mutex(bpage);
 
+    // 这里lock 的时候, 只是trylock 操作, 并不保证获得mutex
     bool acquired = mutex_enter_nowait(block_mutex) == 0;
 
+    // 这里可以看到从 LRU list 上面淘汰page 的时候
+    // 是先尝试replace, 也就是这个page 只是读上来, 没有被修改
+    // 或者修改了, 但是已经被flush 到page 过了
+    // 然后再尝试 flush 操作
     if (acquired && buf_flush_ready_for_replace(bpage)) {
       /* block is ready for eviction i.e., it is
       clean and is not IO-fixed or buffer fixed. */
@@ -1795,6 +1802,9 @@ static ulint buf_flush_LRU_list_batch(buf_pool_t *buf_pool, ulint max) {
       request. The IO helper thread will put it on
       free list in IO completion routine. */
       mutex_exit(block_mutex);
+      // 这里和single flush 的时候是不同的, single flush
+      // 的时候只会将当前要的page flush 就可以, 而这里因为是想批量flush,
+      // 因此除了flush 当前single page, 还会尝试flush neighbour pages
       buf_flush_page_and_try_neighbors(bpage, BUF_FLUSH_LRU, max, &count);
     } else if (!acquired) {
       ut_ad(buf_pool->lru_hp.is_hp(prev));
@@ -1928,7 +1938,8 @@ static ulint buf_do_flush_list_batch(buf_pool_t *buf_pool, ulint min_n,
 flush_list.
 NOTE 1: in the case of an LRU flush the calling thread may own latches to
 pages: to avoid deadlocks, this function must be written so that it cannot
-end up waiting for these latches! NOTE 2: in the case of a flush list flush,
+end up waiting for these latches! 
+NOTE 2: in the case of a flush list flush,
 the calling thread is not allowed to own any latches on pages!
 @param[in]	buf_pool	buffer pool instance
 @param[in]	flush_type	BUF_FLUSH_LRU or BUF_FLUSH_LIST; if
@@ -2740,6 +2751,7 @@ static void pc_request(ulint min_n, lsn_t lsn_limit) {
   page_cleaner->n_slots_flushing = 0;
   page_cleaner->n_slots_finished = 0;
 
+  // 唤醒所有的 page_clean 线程
   os_event_set(page_cleaner->is_requested);
 
   mutex_exit(&page_cleaner->mutex);
@@ -2762,6 +2774,8 @@ static ulint pc_flush_slot(void) {
 
     // 这里slot->state == PAGE_CLEANER_STATE_REQUESTED 是在pc_request()
     // 这个函数里面将这个slot 的状态设置成这个的
+    // 找到第一个 slot->state 是PAGE_CLEANER_STATE_REQUESTED, 然后就开始执行slot
+    // 里面的flush 任务, 并把状态设置成PAGE_CLEANER_STATE_FLUSHING
     for (i = 0; i < page_cleaner->n_slots; i++) {
       slot = &page_cleaner->slots[i];
 
@@ -2824,6 +2838,7 @@ static ulint pc_flush_slot(void) {
   finish_mutex:
     page_cleaner->n_slots_flushing--;
     page_cleaner->n_slots_finished++;
+    // 完成flush 以后 会把slot 的状态设置成 PAGE_CLEANER_STATE_FINISHED
     slot->state = PAGE_CLEANER_STATE_FINISHED;
 
     slot->flush_lru_time += lru_tm;
