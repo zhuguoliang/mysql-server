@@ -3653,6 +3653,7 @@ dberr_t row_merge_build_indexes(
   ut_ad((old_table == new_table) == !col_map);
   ut_ad(!add_cols || col_map);
 
+  // 设置performance schema 里面的状态信息
   stage->begin_phase_read_pk(
       skip_pk_sort && new_table != old_table ? n_indexes - 1 : n_indexes);
 
