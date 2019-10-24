@@ -2928,6 +2928,8 @@ dberr_t row_create_index_for_mysql(
     }
   }
 
+  // 通过设置不同的 trx_dict_op_t 来标志这个事务是否有改dd 信息
+  // 是否改dd 信息对table 的约束也是不一样的
   trx_set_dict_operation(trx, TRX_DICT_OP_TABLE);
 
   /* For temp-table we avoid insertion into SYSTEM TABLES to

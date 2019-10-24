@@ -972,10 +972,10 @@ void btr_cur_search_to_nth_level(
   // 这个是leaf node 需要的latch, 要latch 住前一个, 中间一个, 后一个 3个
   btr_latch_leaves_t latch_leaves = {{NULL, NULL, NULL}, {0, 0, 0}};
 
-// 这里是循环遍历btree 的地方, 如果没有search 到指定level, 那么会又jump 回到这里
-// 在这个search_loop 里面, 在page 级别进行查找的函数是
-// page_cur_search_with_match
-// 因为无论怎么search, 最后还是要进入到一个page, 把一个page 里面的数据读取出来
+  // 这里是循环遍历btree 的地方, 如果没有search 到指定level, 那么会又jump 回到这里
+  // 在这个search_loop 里面, 在page 级别进行查找的函数是
+  // page_cur_search_with_match
+  // 因为无论怎么search, 最后还是要进入到一个page, 把一个page 里面的数据读取出来
 search_loop:
   fetch = cursor->m_fetch_mode;
   rw_latch = RW_NO_LATCH;
@@ -1013,10 +1013,16 @@ search_loop:
     }
   }
 
-  // 之所以需要retry_page_get 是因为有可能写入到ibuf, 但是写入ibuf 有可能失败
-  // 第一次从buffer pool 获得数据的时候使用的是 BUF_GET_IF_IN_POOL 或者BUF_GET_IF_IN_POOL_OR_WATCH
+  // 之所以需要retry_page_get 是因为有可能写入到ibuf, 但是写入ibuf
+  // 是有可能失败的
+  // 失败以后就需要重新进行数据插入到实际的page 中去
+  //
+  // 第一次从buffer pool 获得数据的时候使用的是 fetch mode 是 BUF_GET_IF_IN_POOL 或者BUF_GET_IF_IN_POOL_OR_WATCH
   // 但是如果insert Ibuf 失败了, 那就只能使用BUF_GET 来获得这个page 了,
   // 就算有磁盘IO 也是必须的了
+  // 所以在ibuf 尝试失败以后会把
+  // fetch = cursor->m_fetch_mode;
+  // 来重新进行尝试
 retry_page_get:
   ut_ad(n_blocks < BTR_MAX_LEVELS);
   // 把当前遍历tree 的点记录下来, 这里n_blocks 是和btree 的高度绑定的,
@@ -1030,8 +1036,16 @@ retry_page_get:
                            line, mtr);
   tree_blocks[n_blocks] = block;
 
-  // 如果没有找到这个page, 说明这个search 操作是为insert/delete 服务的, 因此
-  // 触发 search 
+  // 这里第一次block 有可能NULL 是因为这个的fetch == BUF_GET_IF_IN_POOL
+  // 或者BUF_GET_IF_IN_POOL_OR_WATCH, 因此只有这个page 在buffer pool 里面才会get
+  // page 成功, 不会出触发IO 操作
+  // 这里这么做的目的是, 如果这个page 已经在buffer pool 里面了,
+  // 那么我就直接修改即可, 如果这个page 不在buffer pool 里,
+  // 那么如果把这个page 读上来就需要触发磁盘IO, 因此就利用ibuf
+  // 来暂存写入的内容了
+  //
+  // 正常情况下 buf_page_get_gen 操作都不应该返回NULL, 除非这个指定从buffer pool
+  // 返回的
   if (block == NULL) {
     /* This must be a search to perform an insert/delete
     mark/ delete; try using the insert/delete buffer */
@@ -1093,8 +1107,14 @@ retry_page_get:
     /* Insert to the insert/delete buffer did not succeed, we
     must read the page from disk. */
 
-    // 这里先尝试从ibuf 里面插入, 或者删除, 这样就不需要把page
-    // 从磁盘读取出来再写入进去. 但是如果ibuf 满了, 那就只能从page 里面读出来了
+    // 走到这里说明直接通过ibuf 写入是失败的, 可能原因是ibuf 满了, 或者其他的
+    // 这里可以看出如果可以直接通过ibuf 写入, 那么在第一步root page 的时候,
+    // 就已经通过ibuf 写入数据了, 因此是插入是非常快的.
+    // 只不过后续将Ibuf 中的数据写入到btree 同样很慢
+    //
+    // 这里修改了fetch mode, 将fetch mode 去掉 BUF_GET_IF_IN_POOL,
+    // 也就是就算这个page 不在buffer pool 里面, 也要拿到这个page,
+    // 那就需要发起磁盘IO 了
     fetch = cursor->m_fetch_mode;
 
     goto retry_page_get;

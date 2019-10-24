@@ -96,6 +96,11 @@ bool dict_is_old_sys_table(table_id_t id) MY_ATTRIBUTE((warn_unused_result));
 #define DICT_HDR_PAGE_NO FSP_DICT_HDR_PAGE_NO
 
 /* The ids for the basic system tables and their indexes */
+// 这里是几个默认的系统表的space id
+// 1 是保存所有的 table_id 的表的table id
+// 2 是保存所有的 columns_id 的表的 table id
+// 3 是保存所有的 index(索引) 的表的table id
+// 4 是保存所有的 fields_id 的表的table id
 #define DICT_TABLES_ID 1
 #define DICT_COLUMNS_ID 2
 #define DICT_INDEXES_ID 3

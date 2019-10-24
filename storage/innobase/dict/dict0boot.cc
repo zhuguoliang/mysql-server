@@ -226,6 +226,9 @@ dberr_t dict_boot(void) {
   ..._MARGIN, it will immediately be updated to the disk-based
   header. */
 
+  // 这里应该每一个row 都有一个全局对应的row_id, 而这个row_id 也是从
+  // 全局的dick_sys 中进行赋值, 如果重启以后, 就默认加上 256
+  // 所以不同的表的所有的row 也是不一样的row_id
   dict_sys->row_id =
       DICT_HDR_ROW_ID_WRITE_MARGIN +
       ut_uint64_align_up(mach_read_from_8(dict_hdr + DICT_HDR_ROW_ID),
@@ -259,8 +262,10 @@ dberr_t dict_boot(void) {
 
     /* Insert into the dictionary cache the descriptions of the basic
     system tables */
+    // 创建系统默认表
     table = dict_mem_table_create("SYS_TABLES", DICT_HDR_SPACE, 8, 0, 0, 0, 0);
 
+    // 对系统默认表SYS_TABLES 添加列
     dict_mem_table_add_col(table, heap, "NAME", DATA_BINARY, 0,
                            MAX_FULL_NAME_LEN);
     dict_mem_table_add_col(table, heap, "ID", DATA_BINARY, 0, 8);

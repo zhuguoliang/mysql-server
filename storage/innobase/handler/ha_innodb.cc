@@ -10679,6 +10679,7 @@ void innodb_base_col_setup_for_stored(const dict_table_t *table,
 /** Create a table definition to an InnoDB database.
 @param[in]	dd_table	dd::Table or nullptr for intrinsic table
 @return HA_* level error */
+// 开始建立table 相关的 metadata 信息
 inline MY_ATTRIBUTE((warn_unused_result)) int create_table_info_t::
     create_table_def(const dd::Table *dd_table) {
   dict_table_t *table;
@@ -10729,6 +10730,7 @@ inline MY_ATTRIBUTE((warn_unused_result)) int create_table_info_t::
     DBUG_RETURN(HA_ERR_WRONG_TABLE_NAME);
   }
 
+  // m_form 保存着SERVER 层对这个table 的描述
   n_cols = m_form->s->fields;
 
   /* Find out any virtual column */
@@ -10759,6 +10761,8 @@ inline MY_ATTRIBUTE((warn_unused_result)) int create_table_info_t::
 
   /* For single-table tablespaces, we pass 0 as the space id, and then
   determine the actual space id when the tablespace is created. */
+  // 在table per tablespace 场景下, 先给这个table->space_id 赋值0
+  // 在tablespace 创建的时候, 再设置
   if (DICT_TF_HAS_SHARED_SPACE(m_flags)) {
     ut_ad(m_tablespace != NULL && m_tablespace[0] != '\0');
 
@@ -10773,6 +10777,8 @@ inline MY_ATTRIBUTE((warn_unused_result)) int create_table_info_t::
     actual_n_cols += 1;
   }
 
+
+  // 创建对应的内存中 dict_table_t 结构体
   table = dict_mem_table_create(m_table_name, space_id, actual_n_cols, num_v,
                                 num_m_v, m_flags, m_flags2);
 
@@ -10802,6 +10808,7 @@ inline MY_ATTRIBUTE((warn_unused_result)) int create_table_info_t::
 
   heap = mem_heap_create(1000);
 
+  // 对于m_form 里面的所有field 都需要在InnoDB 执行创建操作
   for (i = 0; i < n_cols; i++) {
     ulint nulls_allowed;
     ulint unsigned_type;
@@ -10909,6 +10916,7 @@ inline MY_ATTRIBUTE((warn_unused_result)) int create_table_info_t::
       goto error_ret;
     }
 
+    // 如果是非 virtual 列, 在添加到dict_mem_table 中
     if (!is_virtual) {
       dict_mem_table_add_col(
           table, heap, field_name, col_type,
@@ -12741,6 +12749,7 @@ int create_table_info_t::prepare_create_table(const char *name) {
   ut_ad(m_thd != NULL);
   ut_ad(m_form->s->row_type == m_create_info->row_type);
 
+  // 这里SQL 对大小写不敏感, 因为在InnoDB 里面, 都转换成了小写了
   normalize_table_name(m_table_name, name);
 
   set_tablespace_type(false);
@@ -12880,6 +12889,12 @@ int create_table_info_t::create_table(const dd::Table *dd_table) {
   the primary key is always number 0, if it exists */
   ut_a(primary_key_no == MAX_KEY || primary_key_no == 0);
 
+  // create table 分成多个阶段
+  // 1. 先create 这个table 的metadata
+  // 2. 对于table 的primary index 进行create
+  // 3. create FTS 相关信息
+  // 4. 对于table 的 secondary index 进行create
+  // 5. 如果有auto_inc, create auto_inc 相关信息
   error = create_table_def(dd_table);
   if (error) {
     DBUG_RETURN(error);
@@ -13241,6 +13256,7 @@ int innobase_basic_ddl::create_impl(THD *thd, const char *name, TABLE *form,
   }
 
   /* Prepare for create and validate options. */
+  // create 之前会做相应的prepare 检查
   error = info.prepare_create_table(name);
 
   if (error != 0) {
