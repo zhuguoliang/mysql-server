@@ -185,6 +185,9 @@ ulint trx_undo_page_get_end(
 
     end = mach_read_from_2(log_hdr + TRX_UNDO_NEXT_LOG);
 
+    // 如果读到的TRX_UNDO_NEXT_LOG == 0, 表示这个undo next log offset 还没有
+    // 那么就可以从undo page header 里面找一下现在空闲的位置在哪
+    // 就是这个log 的END 位置了
     if (end == 0) {
       end =
           mach_read_from_2(undo_page + TRX_UNDO_PAGE_HDR + TRX_UNDO_PAGE_FREE);

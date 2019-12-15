@@ -801,17 +801,21 @@ void BtrBulk::latch() {
 @return error code */
 dberr_t BtrBulk::prepareSpace(PageBulk *&page_bulk, ulint level,
                               ulint rec_size) {
+  // 如果当前的page_bulk 还有rec_size 的空闲space, 那么就可以直接返回了
+  // 不需要额外再申请一个page
   if (page_bulk->isSpaceAvailable(rec_size)) {
     return (DB_SUCCESS);
   }
 
   /* Finish page modifications. */
+  // 当前page_bulk 已经满了, 对这个page bulk 进行提交
   page_bulk->finish();
 
   DBUG_EXECUTE_IF("ib_btr_bulk_prepare_space_error",
                   { return (DB_OUT_OF_MEMORY); });
 
   /* Create a sibling page_bulk. */
+  // 创建当前page_bulk 相邻的 sibling_page_bulk
   PageBulk *sibling_page_bulk = UT_NEW_NOKEY(
       PageBulk(m_index, m_trx_id, FIL_NULL, level, m_flush_observer));
   if (sibling_page_bulk == nullptr) {
@@ -825,6 +829,7 @@ dberr_t BtrBulk::prepareSpace(PageBulk *&page_bulk, ulint level,
   }
 
   /* Commit page bulk. */
+  // 已经申请好了 sibling_page, 那么把当前这个page_bulk commit 了
   auto commit_err = pageCommit(page_bulk, sibling_page_bulk, true);
   if (commit_err != DB_SUCCESS) {
     pageAbort(sibling_page_bulk);
@@ -905,6 +910,8 @@ dberr_t BtrBulk::insert(dtuple_t *tuple, ulint level) {
   ut_ad(m_page_bulks != nullptr);
 
   /* Check if we need to create a PageBulk for the level. */
+  // 这里先检查是否需要创建这一层的PageBulk
+  // 因为可能第一次达到这一层
   if (level + 1 > m_page_bulks->size()) {
     PageBulk *new_page_bulk = UT_NEW_NOKEY(
         PageBulk(m_index, m_trx_id, FIL_NULL, level, m_flush_observer));

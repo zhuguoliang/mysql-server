@@ -255,6 +255,7 @@ class PageBulk {
   const bool m_is_comp;
 
   /** The heap top in page for next insert */
+  // page 里面要插入的下一个位置
   byte *m_heap_top;
 
   /** User record no */

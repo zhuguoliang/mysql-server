@@ -726,6 +726,9 @@ bool lock_has_to_wait(const lock_t *lock1, /*!< in: waiting lock */
 ulint lock_rec_find_set_bit(
     const lock_t *lock) /*!< in: record lock with at least one bit set */
 {
+  // 这里找到是这个page 里面第几个bit 拥有这个lock, n_bits 就是这个Lock
+  // 里面的所有的lock 总共的个数, 然后遍历每一个. 因为lock_t 是wait_lock
+  // 传进来的, 所以肯定只有一个bit 被设置成true
   for (ulint i = 0; i < lock_rec_get_n_bits(lock); ++i) {
     if (lock_rec_get_nth_bit(lock, i)) {
       return (i);
@@ -7048,7 +7051,7 @@ const trx_t *DeadlockChecker::search() {
    *
    * 这里要注意的地方是 一个trx 等等的wait_lock 只会有一个, 但是这个wait_lock
    * 可能被多个地方持有, 比如你的wait_lock 可能是12 record 上的lock_X,
-   * 但是这个时候你需要遍历的确实12 record 上面所有的lock, 因为有可能12 record
+   * 但是这个时候你需要遍历的却是12 record 上面所有的lock, 因为有可能12 record
    * 上面的lock_S 被多个trx 持有的, 这个正常的, 那么就需要遍历lock_X
    * 和所有lock_S trx 的可能, 所以这个时候新的x lock 其实适合所有拥有12 record
    * 的s lock 都需要连一条边, 那么回溯的时候就是尝试了其中一个lock_S 后,
@@ -7060,6 +7063,10 @@ const trx_t *DeadlockChecker::search() {
    */
   for (;;) {
     /* We should never visit the same sub-tree more than once. */
+    // 这里is_visited 用的是一个全局的版本号标记, 然后deadlockchecker
+    // 用的也是一个全局的版本号, 如果这个trx 被访问过, 那么就把这个版本号更新,
+    // 那么是否在这次deadlockchecker 访问过, 只要检查一下trx->lock.deadlock_mark
+    // 和 m_mark_start 的比较就可以了
     ut_ad(lock == NULL || !is_visited(lock));
 
     while (m_n_elems > 0 && lock == NULL) {

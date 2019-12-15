@@ -1293,6 +1293,7 @@ static void trx_start_low(
   // 如果不是read_only 的 trx, 就是rw trx
   if (!trx->read_only &&
       (trx->mysql_thd == 0 || read_write || trx->ddl_operation)) {
+    // 事务启动的时候分配undo 回滚段入口
     trx_assign_rseg_durable(trx);
 
     /* Temporary rseg is assigned only if the transaction

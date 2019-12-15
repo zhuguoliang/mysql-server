@@ -3767,6 +3767,7 @@ dberr_t row_merge_build_indexes(
   /* Now we have files containing index entries ready for
   sorting and inserting. */
 
+  // 对于每一个index 都需要重建index
   for (i = 0; i < n_indexes; i++) {
     dict_index_t *sort_idx = indexes[i];
 

@@ -6625,6 +6625,8 @@ Slot *AIO::reserve_slot(IORequest &type, fil_node_t *m1, void *m2,
   guaranteed to find a slot in full scan. */
   // 从根据offset 算出的local_seg 开始查找, 也就是从对应的segment header
   // 开始找空闲的slot
+  // 但是这里找的最大值是m_slots.size(), 也就是尽可能从这个slot 开始找,
+  // 将相邻的IO 放在相邻的slot 上, 这样就可以合成一个IO
   for (ulint i = local_seg * slots_per_seg; counter < m_slots.size();
        ++i, ++counter) {
     i %= m_slots.size();
@@ -7269,6 +7271,8 @@ class SimulatedAIOHandler {
 
   /** Reset the state of the handler
   @param[in]	n_slots	Number of pending AIO operations supported */
+  // 这里初始化的时候指定m_n_slots
+  // 所以一个线程会只负责自己指定范围的slot 的IO
   void init(ulint n_slots) {
     m_oldest = 0;
     m_n_elems = 0;
@@ -7560,12 +7564,17 @@ class SimulatedAIOHandler {
 
  private:
   ulint m_oldest;
-  // 当前这次IO 包含的slot 个数
+  // 当前线程, 这个segment 服务的slot 的个数
   ulint m_n_elems;
   os_offset_t m_lowest_offset;
 
   AIO *m_array;
+  // 当前thread 负责的slot 个数
+  // 那么具体负责的slot 就是 (m_segment * m_n_slots, (m_segment + 1) *
+  // m_n_slots)
+  // 所以可能存在某些IO线程很空闲, 某些IO 线程很忙的情况
   ulint m_n_slots;
+  // 当前SimulatedAIOHandler 对应的是哪一个segment
   ulint m_segment;
 
   slots_t m_slots;
@@ -7627,13 +7636,16 @@ static dberr_t os_aio_simulated_handler(ulint global_segment, fil_node_t **m1,
   os_event_t event = os_aio_segment_wait_events[global_segment];
 
   // 根据global_segment 算出当前的 segment
+  // 这里global_segment 是从最开始的第几个 srv_n_file_io_threads 一直传下来的
   segment = AIO::get_array_and_local_segment(&array, global_segment);
 
+  // 初始化handler 的时候就会指定某一个handler
   SimulatedAIOHandler handler(array, segment);
 
   for (;;) {
     srv_set_io_thread_op_info(global_segment, "looking for i/o requests (a)");
 
+    // 这里n_slots 是一个segment 负责的slot 个数
     ulint n_slots = handler.check_pending(global_segment, event);
 
     if (n_slots == 0) {
