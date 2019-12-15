@@ -60,6 +60,8 @@ void mlog_catenate_string(mtr_t *mtr,      /*!< in: mtr */
 /** Writes the initial part of a log record consisting of one-byte item
  type and four-byte space and page numbers. Also pushes info
  to the mtr memo that a buffer page has been modified. */
+// 这里write initial log record 指的就是写mtr 的通用结构
+// Type(1) + Space ID(4) + Page Number(4)
 void mlog_write_initial_log_record(
     const byte *ptr, /*!< in: pointer to (inside) a buffer
                      frame holding the file page where
@@ -72,6 +74,21 @@ void mlog_write_initial_log_record(
   ut_ad(type <= MLOG_BIGGEST_TYPE);
   ut_ad(type > MLOG_8BYTES);
 
+  // 我看这里写initial_log_record 的时候, 默认申请了11个字节的大小
+  // 其实这里只需要 Type(1) + Space ID(4) + Page Number(4) = 9 字节大小的空间
+  // 我们看mlog_write_initial_log_record_fast 也确实只写了9字节
+  // 但是为什么直接就申请了11 字节?
+  // 主要原因是因为
+  // log_ptr += mach_write_compressed(log_ptr, space_id);
+  // 这里写的是compressed 的类型, 这个类型里面 uint32_t 会根据具体的大小选择的是
+  // 1, 2, 3, 4, 5 字节, 所以这里选择内存大小最大的5字节
+  //
+  // mtr 的内存使用的是
+  // mtr_buf_t m_log;
+  // typedef dyn_buf_t<DYN_ARRAY_DATA_SIZE> mtr_buf_t;
+  // 因此就提前把这个内存空间申请下来了, 但是其实在mlog_close() 里面,
+  // m_size -= block->used();
+  // 会把这个多余的空间内存给删除掉
   log_ptr = mlog_open(mtr, 11);
 
   /* If no logging is requested, we may return now */
@@ -153,6 +170,8 @@ byte *mlog_parse_initial_log_record(
 
 /** Parses a log record written by mlog_write_ulint or mlog_write_ull.
  @return parsed record end, NULL if not a complete record or a corrupt record */
+
+// parse 完, 直接apply 这个record, 对page 上面字段进行修改
 byte *mlog_parse_nbytes(
     mlog_id_t type,      /*!< in: log record type: MLOG_1BYTE, ... */
     const byte *ptr,     /*!< in: buffer */
@@ -246,6 +265,8 @@ byte *mlog_parse_nbytes(
 
 /** Writes 1, 2 or 4 bytes to a file page. Writes the corresponding log
  record to the mini-transaction log if mtr is not NULL. */
+// 修改一个page 里面的某几个字节的内容, 同时如果有mtr 的话,
+// 把这个修改的记录传到mtr 里面
 void mlog_write_ulint(
     byte *ptr,      /*!< in: pointer where to write */
     ulint val,      /*!< in: value to write */
@@ -267,6 +288,10 @@ void mlog_write_ulint(
   }
 
   if (mtr != 0) {
+    // 这里 2 是Page Offset
+    // 5 是Value, 因为这里选择了对int 进行压缩
+    // log_ptr += mach_write_compressed(log_ptr, space_id);
+    // 所以可能变成5字节
     byte *log_ptr = mlog_open(mtr, 11 + 2 + 5);
 
     /* If no logging is requested, we may return now */
@@ -293,6 +318,9 @@ void mlog_write_ull(byte *ptr,       /*!< in: pointer where to write */
   mach_write_to_8(ptr, val);
 
   if (mtr != 0) {
+    // 同样这里 2 是page offset
+    // 9 是 uint64_t 但是有可能进行mach_u64_write_compressed
+    // 就变成了 9字节了
     byte *log_ptr = mlog_open(mtr, 11 + 2 + 9);
 
     /* If no logging is requested, we may return now */
@@ -377,8 +405,10 @@ byte *mlog_parse_string(
     return (NULL);
   }
 
+  // 先parse 这个 string 所在的偏移量
   offset = mach_read_from_2(ptr);
   ptr += 2;
+  // 然后 parse 这个string 的长度
   len = mach_read_from_2(ptr);
   ptr += 2;
 
