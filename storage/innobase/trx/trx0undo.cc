@@ -1667,14 +1667,10 @@ dberr_t trx_undo_assign_undo(
 #endif
           trx_undo_reuse_cached(trx, rseg, type, trx->id, trx->xid, &mtr);
 
-<<<<<<< HEAD
   // 先尝试从cached list 上去获得undo, 如果没有cached 的undo 了,
   // 那么再申请新的undo slot, 并创建对应的undo page
   undo = trx_undo_reuse_cached(trx, rseg, type, trx->id, trx->xid, &mtr);
-  if (undo == NULL) {
-=======
   if (undo == nullptr) {
->>>>>>> master
     err = trx_undo_create(trx, rseg, type, trx->id, trx->xid, &undo, &mtr);
     if (err != DB_SUCCESS) {
       goto func_exit;
