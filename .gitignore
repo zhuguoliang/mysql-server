@@ -22,3 +22,4 @@ extra/wolfssl-*
 # Configuration files for Visual Studio Code
 .vscode/
 build/
+cscope.*
