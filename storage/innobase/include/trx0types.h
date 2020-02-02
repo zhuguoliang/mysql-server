@@ -477,6 +477,9 @@ scheduled for purge. */
 // 一个trx 对应的多个undo rollback segment
 // TODO(baotiao): 为什么一个trx 要对应多个undo rollback segment
 // 我记得在事务开始阶段一旦设置了rollback segment 就一直从这个rseg 分配slot 了
+// 每个回滚段用一个Mutex保护，对于写密集工作负载可能成为性能瓶颈，因此使用多个
+// 回滚段会提高性能
+// https://www.percona.com/blog/2009/01/18/partial-fix-of-innodb-scalability-rollback-segments/
 class TrxUndoRsegs {
  public:
   /** Default constructor */
